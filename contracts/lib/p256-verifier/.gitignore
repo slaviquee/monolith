@@ -1,0 +1,16 @@
+# Compiler files
+cache/
+out/
+
+# Ignores development broadcast logs
+broadcast/*/*/*
+!broadcast/*/*/run-latest.json
+
+# Docs
+docs/
+
+# Dotenv file
+.env
+
+# test-vectors
+node_modules/

@@ -1,0 +1,23 @@
+{
+  "name": "clawvault-skill",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "ClawVault crypto wallet skill for OpenClaw agents",
+  "scripts": {
+    "send": "node scripts/send.js",
+    "swap": "node scripts/swap.js",
+    "balance": "node scripts/balance.js",
+    "capabilities": "node scripts/capabilities.js",
+    "decode": "node scripts/decode.js",
+    "panic": "node scripts/panic.js",
+    "status": "node scripts/status.js",
+    "identity": "node scripts/identity.js",
+    "setup": "node scripts/setup.js",
+    "audit-log": "node scripts/audit-log.js",
+    "policy": "node scripts/policy.js",
+    "allowlist": "node scripts/allowlist.js"
+  },
+  "dependencies": {
+    "viem": "^2.21.0"
+  }
+}

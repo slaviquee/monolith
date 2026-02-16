@@ -1,0 +1,88 @@
+import Foundation
+
+/// POST /panic — Emergency freeze (no Touch ID — speed over ceremony).
+struct PanicHandler {
+    let policyEngine: PolicyEngine
+    let auditLogger: AuditLogger
+    var configUpdater: (inout DaemonConfig) -> Void
+    let userOpBuilder: UserOpBuilder?
+    let seManager: SecureEnclaveManager?
+    let bundlerClient: BundlerClient?
+    let config: DaemonConfig
+
+    func handle(request: HTTPRequest) async -> HTTPResponse {
+        // Freeze locally immediately
+        await policyEngine.freeze()
+
+        // D5: Persist frozen=true to DaemonConfig on disk
+        var updatedConfig = config
+        configUpdater(&updatedConfig)
+        do {
+            try updatedConfig.save()
+        } catch {
+            // Log but don't fail — local freeze is the priority
+            await auditLogger.log(
+                action: "panic",
+                decision: "warning",
+                reason: "Failed to persist frozen state: \(error.localizedDescription)"
+            )
+        }
+
+        await auditLogger.log(
+            action: "panic",
+            decision: "frozen",
+            reason: "Emergency freeze via /panic"
+        )
+
+        // D6: Submit on-chain freeze() call via UserOp in a background task
+        // Don't block the /panic response — local freeze is the priority
+        if let walletAddress = config.walletAddress,
+           let userOpBuilder = userOpBuilder,
+           let seManager = seManager,
+           let bundlerClient = bundlerClient
+        {
+            let entryPoint = config.entryPointAddress
+            let logger = auditLogger
+            Task.detached {
+                do {
+                    // freeze() selector = 0x62a5af3b
+                    let freezeCalldata = Data([0x62, 0xa5, 0xaf, 0x3b])
+
+                    var userOp = try await userOpBuilder.build(
+                        sender: walletAddress,
+                        target: walletAddress,
+                        value: 0,
+                        calldata: freezeCalldata
+                    )
+
+                    let hash = await userOpBuilder.computeHash(userOp: userOp)
+                    let rawSignature = try await seManager.sign(hash)
+                    userOp.signature = SignatureUtils.normalizeSignature(rawSignature)
+
+                    let txHash = try await bundlerClient.sendUserOperation(
+                        userOp: userOp.toDict(),
+                        entryPoint: entryPoint
+                    )
+
+                    await logger.log(
+                        action: "panic",
+                        decision: "on_chain_freeze_submitted",
+                        txHash: txHash
+                    )
+                } catch {
+                    // On-chain freeze failed — log but local freeze is still in effect
+                    await logger.log(
+                        action: "panic",
+                        decision: "on_chain_freeze_failed",
+                        reason: "On-chain freeze() submission failed: \(error.localizedDescription)"
+                    )
+                }
+            }
+        }
+
+        return .json(200, [
+            "status": "frozen",
+            "message": "Wallet frozen immediately. Unfreeze requires Touch ID + 10min delay.",
+        ])
+    }
+}

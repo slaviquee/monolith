@@ -1,0 +1,28 @@
+# macOS
+.DS_Store
+*.swp
+*.swo
+
+# Swift
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+
+# Foundry
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+
+# Node
+node_modules/
+skill/node_modules/
+
+# ClawVault runtime
+.clawvault/
+
+# Environment / secrets
+.env
+.env.*
