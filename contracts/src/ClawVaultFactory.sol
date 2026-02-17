@@ -22,8 +22,10 @@ contract ClawVaultFactory {
     /// @param signerX P-256 public key x-coordinate.
     /// @param signerY P-256 public key y-coordinate.
     /// @param recoveryAddress Recovery EOA.
-    /// @param dailyCap Daily spending cap in wei-equivalent.
+    /// @param dailyCap Daily ETH spending cap in wei.
+    /// @param dailyStablecoinCap Daily stablecoin spending cap (18-decimal normalized).
     /// @param stablecoins Known stablecoin addresses on this chain.
+    /// @param stablecoinDecs Decimals for each stablecoin (parallel array).
     /// @param usePrecompile Whether P-256 precompile is available.
     /// @param salt CREATE2 salt for deterministic addressing.
     /// @return wallet The deployed wallet address.
@@ -32,19 +34,21 @@ contract ClawVaultFactory {
         uint256 signerY,
         address recoveryAddress,
         uint256 dailyCap,
+        uint256 dailyStablecoinCap,
         address[] calldata stablecoins,
+        uint8[] calldata stablecoinDecs,
         bool usePrecompile,
         bytes32 salt
     ) external returns (ClawVaultWallet wallet) {
         bytes32 actualSalt = _computeSalt(signerX, signerY, recoveryAddress, salt);
 
         // Check if already deployed
-        address predicted = getAddress(signerX, signerY, recoveryAddress, dailyCap, stablecoins, usePrecompile, salt);
+        address predicted = getAddress(signerX, signerY, recoveryAddress, dailyCap, dailyStablecoinCap, stablecoins, stablecoinDecs, usePrecompile, salt);
         if (predicted.code.length > 0) revert WalletAlreadyDeployed();
 
         // Deploy fresh wallet via CREATE2 with all init params in constructor
         wallet = new ClawVaultWallet{salt: actualSalt}(
-            entryPoint, signerX, signerY, recoveryAddress, dailyCap, stablecoins, usePrecompile
+            entryPoint, signerX, signerY, recoveryAddress, dailyCap, dailyStablecoinCap, stablecoins, stablecoinDecs, usePrecompile
         );
 
         emit WalletCreated(address(wallet), signerX, signerY, recoveryAddress);
@@ -56,7 +60,9 @@ contract ClawVaultFactory {
         uint256 signerY,
         address recoveryAddress,
         uint256 dailyCap,
+        uint256 dailyStablecoinCap,
         address[] calldata stablecoins,
+        uint8[] calldata stablecoinDecs,
         bool usePrecompile,
         bytes32 salt
     ) public view returns (address) {
@@ -64,7 +70,7 @@ contract ClawVaultFactory {
         bytes32 initCodeHash = keccak256(
             abi.encodePacked(
                 type(ClawVaultWallet).creationCode,
-                abi.encode(entryPoint, signerX, signerY, recoveryAddress, dailyCap, stablecoins, usePrecompile)
+                abi.encode(entryPoint, signerX, signerY, recoveryAddress, dailyCap, dailyStablecoinCap, stablecoins, stablecoinDecs, usePrecompile)
             )
         );
         return address(

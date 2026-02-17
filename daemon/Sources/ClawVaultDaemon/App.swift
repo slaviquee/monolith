@@ -97,6 +97,16 @@ struct ClawVaultDaemon {
         let approvalManager = ApprovalManager()
         let auditLogger = AuditLogger()
 
+        // ServiceContainer: wraps all chain-dependent services so /setup can reconfigure them
+        let services = ServiceContainer(
+            chainClient: chainClient,
+            bundlerClient: bundlerClient,
+            userOpBuilder: userOpBuilder,
+            policyEngine: policyEngine,
+            protocolRegistry: protocolRegistry,
+            stablecoinRegistry: stablecoinRegistry
+        )
+
         // Set up router
         let router = RequestRouter()
 
@@ -114,9 +124,7 @@ struct ClawVaultDaemon {
         // Capabilities
         let capsHandler = CapabilitiesHandler(
             configStore: configStore,
-            policyEngine: policyEngine,
-            chainClient: chainClient,
-            protocolRegistry: protocolRegistry
+            services: services
         )
         router.register("GET", "/capabilities") { req in
             await capsHandler.handle(request: req)
@@ -125,8 +133,7 @@ struct ClawVaultDaemon {
         // Decode
         let decodeHandler = DecodeHandler(
             configStore: configStore,
-            stablecoinRegistry: stablecoinRegistry,
-            protocolRegistry: protocolRegistry
+            services: services
         )
         router.register("POST", "/decode") { req in
             await decodeHandler.handle(request: req)
@@ -134,11 +141,8 @@ struct ClawVaultDaemon {
 
         // Sign
         let signHandler = SignHandler(
-            policyEngine: policyEngine,
-            userOpBuilder: userOpBuilder,
+            services: services,
             seManager: seManager,
-            bundlerClient: bundlerClient,
-            chainClient: chainClient,
             approvalManager: approvalManager,
             auditLogger: auditLogger,
             configStore: configStore
@@ -150,7 +154,7 @@ struct ClawVaultDaemon {
         // Policy
         let policyHandler = PolicyHandler(
             configStore: configStore,
-            policyEngine: policyEngine,
+            services: services,
             seManager: seManager,
             auditLogger: auditLogger
         )
@@ -164,9 +168,7 @@ struct ClawVaultDaemon {
         // Setup
         let setupHandler = SetupHandler(
             seManager: seManager,
-            chainClient: chainClient,
-            bundlerClient: bundlerClient,
-            userOpBuilder: userOpBuilder,
+            services: services,
             auditLogger: auditLogger,
             configStore: configStore
         )
@@ -179,7 +181,7 @@ struct ClawVaultDaemon {
 
         // Allowlist
         let allowlistHandler = AllowlistHandler(
-            policyEngine: policyEngine,
+            services: services,
             seManager: seManager,
             auditLogger: auditLogger,
             configStore: configStore
@@ -190,15 +192,24 @@ struct ClawVaultDaemon {
 
         // Panic
         let panicHandler = PanicHandler(
-            policyEngine: policyEngine,
+            services: services,
             auditLogger: auditLogger,
-            userOpBuilder: userOpBuilder,
             seManager: seManager,
-            bundlerClient: bundlerClient,
             configStore: configStore
         )
         router.register("POST", "/panic") { req in
             await panicHandler.handle(request: req)
+        }
+
+        // Unfreeze
+        let unfreezeHandler = UnfreezeHandler(
+            services: services,
+            seManager: seManager,
+            auditLogger: auditLogger,
+            configStore: configStore
+        )
+        router.register("POST", "/unfreeze") { req in
+            await unfreezeHandler.handle(request: req)
         }
 
         // Audit log

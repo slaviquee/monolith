@@ -34,6 +34,11 @@ contract ClawVaultWallet is IAccount {
     uint256 public currentDay;
     mapping(address => bool) public knownStablecoins;
 
+    // ─── Stablecoin Spending (separate counter with decimal normalization) ───
+    uint256 public dailyStablecoinCap;
+    uint256 public stablecoinSpentToday;
+    mapping(address => uint8) public stablecoinDecimals;
+
     // ─── Recovery State ───────────────────────────────────────────────────────
     address public recoveryAddress;
     bool public frozen;
@@ -51,7 +56,9 @@ contract ClawVaultWallet is IAccount {
     event KeyRotationInitiated(bytes newPubKey, uint64 readyAt);
     event KeyRotationFinalized(bytes newPubKey);
     event DailyCapUpdated(uint256 newCap);
-    event StablecoinUpdated(address token, bool status);
+    event DailyStablecoinCapUpdated(uint256 newCap);
+    event StablecoinUpdated(address token, bool status, uint8 decimals);
+    event StablecoinSpendingTracked(uint256 normalizedAmount, uint256 stablecoinSpentToday, uint256 dailyStablecoinCap);
 
     // ─── Errors ───────────────────────────────────────────────────────────────
     error OnlyEntryPoint();
@@ -68,6 +75,7 @@ contract ClawVaultWallet is IAccount {
     error NoPaymastersAllowed();
     error InvalidPublicKey();
     error InvalidRecoveryAddress();
+    error DailyStablecoinCapExceeded(uint256 attempted, uint256 remaining);
 
     // ─── Modifiers ────────────────────────────────────────────────────────────
     modifier onlyEntryPoint() {
@@ -95,8 +103,10 @@ contract ClawVaultWallet is IAccount {
     /// @param _signerX P-256 public key x-coordinate.
     /// @param _signerY P-256 public key y-coordinate.
     /// @param _recoveryAddress EOA or hardware wallet for emergency recovery.
-    /// @param _dailyCap Daily spending cap in wei-equivalent units.
+    /// @param _dailyCap Daily spending cap in wei for native ETH.
+    /// @param _dailyStablecoinCap Daily spending cap for stablecoins (18-decimal normalized).
     /// @param _stablecoins Array of known stablecoin addresses on this chain.
+    /// @param _stablecoinDecs Decimals for each stablecoin (parallel array with _stablecoins).
     /// @param _usePrecompile Whether the P-256 precompile is available.
     constructor(
         IEntryPoint _entryPoint,
@@ -104,21 +114,26 @@ contract ClawVaultWallet is IAccount {
         uint256 _signerY,
         address _recoveryAddress,
         uint256 _dailyCap,
+        uint256 _dailyStablecoinCap,
         address[] memory _stablecoins,
+        uint8[] memory _stablecoinDecs,
         bool _usePrecompile
     ) {
         if (_recoveryAddress == address(0)) revert InvalidRecoveryAddress();
         if (_signerX == 0 || _signerY == 0) revert InvalidPublicKey();
+        require(_stablecoins.length == _stablecoinDecs.length, "Stablecoin/decimals length mismatch");
         entryPoint = _entryPoint;
         signerX = _signerX;
         signerY = _signerY;
         recoveryAddress = _recoveryAddress;
         dailySpendingCap = _dailyCap;
+        dailyStablecoinCap = _dailyStablecoinCap;
         usePrecompile = _usePrecompile;
         currentDay = block.timestamp / 1 days;
 
         for (uint256 i = 0; i < _stablecoins.length; i++) {
             knownStablecoins[_stablecoins[i]] = true;
+            stablecoinDecimals[_stablecoins[i]] = _stablecoinDecs[i];
         }
     }
 
@@ -238,12 +253,19 @@ contract ClawVaultWallet is IAccount {
         emit DailyCapUpdated(newCap);
     }
 
-    /// @notice Update stablecoin registry. Only callable by recovery address.
+    /// @notice Update the daily stablecoin spending cap. Only callable by recovery address.
+    function setDailyStablecoinCap(uint256 newCap) external onlyRecovery {
+        dailyStablecoinCap = newCap;
+        emit DailyStablecoinCapUpdated(newCap);
+    }
+
+    /// @notice Update stablecoin registry with decimals. Only callable by recovery address.
     /// @dev Uses onlyRecovery (not onlySelf) so the signing key cannot manipulate
     ///      which tokens are tracked for spending caps.
-    function setStablecoin(address token, bool status) external onlyRecovery {
+    function setStablecoin(address token, bool status, uint8 decimals) external onlyRecovery {
         knownStablecoins[token] = status;
-        emit StablecoinUpdated(token, status);
+        stablecoinDecimals[token] = decimals;
+        emit StablecoinUpdated(token, status, decimals);
     }
 
     // ─── Receive ETH ──────────────────────────────────────────────────────────
@@ -263,32 +285,57 @@ contract ClawVaultWallet is IAccount {
         uint256 day = block.timestamp / 1 days;
         if (day != currentDay) {
             spentToday = 0;
+            stablecoinSpentToday = 0;
             currentDay = day;
         }
 
-        uint256 spendAmount = value;
-
-        // Track ERC-20 transfer() and transferFrom() calls — both stablecoins and unknown tokens count
-        if (data.length >= 68) {
-            bytes4 selector = bytes4(data[:4]);
-            if (selector == bytes4(0xa9059cbb)) {
-                // transfer(address,uint256)
-                (, uint256 transferAmount) = abi.decode(data[4:], (address, uint256));
-                spendAmount += transferAmount;
-            } else if (data.length >= 100 && selector == bytes4(0x23b872dd)) {
-                // transferFrom(address,address,uint256)
-                (,, uint256 transferAmount) = abi.decode(data[4:], (address, address, uint256));
-                spendAmount += transferAmount;
+        // Track native ETH value against ETH cap
+        if (value > 0) {
+            uint256 ethRemaining = dailySpendingCap > spentToday ? dailySpendingCap - spentToday : 0;
+            if (value > ethRemaining) {
+                revert DailyCapExceeded(value, ethRemaining);
             }
+            spentToday += value;
+            emit SpendingTracked(value, spentToday, dailySpendingCap);
         }
 
-        if (spendAmount > 0) {
-            uint256 remaining = dailySpendingCap > spentToday ? dailySpendingCap - spentToday : 0;
-            if (spendAmount > remaining) {
-                revert DailyCapExceeded(spendAmount, remaining);
+        // Track ERC-20 transfer() and transferFrom() calls
+        if (data.length >= 68) {
+            bytes4 selector = bytes4(data[:4]);
+            uint256 transferAmount;
+            if (selector == bytes4(0xa9059cbb)) {
+                // transfer(address,uint256)
+                (, transferAmount) = abi.decode(data[4:], (address, uint256));
+            } else if (data.length >= 100 && selector == bytes4(0x23b872dd)) {
+                // transferFrom(address,address,uint256)
+                (,, transferAmount) = abi.decode(data[4:], (address, address, uint256));
             }
-            spentToday += spendAmount;
-            emit SpendingTracked(spendAmount, spentToday, dailySpendingCap);
+
+            if (transferAmount > 0) {
+                if (knownStablecoins[target]) {
+                    // Known stablecoin: normalize to 18 decimals, track against stablecoin cap
+                    uint8 decimals = stablecoinDecimals[target];
+                    uint256 normalized = decimals < 18
+                        ? transferAmount * (10 ** (18 - decimals))
+                        : transferAmount;
+                    uint256 stableRemaining = dailyStablecoinCap > stablecoinSpentToday
+                        ? dailyStablecoinCap - stablecoinSpentToday
+                        : 0;
+                    if (normalized > stableRemaining) {
+                        revert DailyStablecoinCapExceeded(normalized, stableRemaining);
+                    }
+                    stablecoinSpentToday += normalized;
+                    emit StablecoinSpendingTracked(normalized, stablecoinSpentToday, dailyStablecoinCap);
+                } else {
+                    // Unknown token: add raw amount to ETH counter (conservative)
+                    uint256 ethRemaining = dailySpendingCap > spentToday ? dailySpendingCap - spentToday : 0;
+                    if (transferAmount > ethRemaining) {
+                        revert DailyCapExceeded(transferAmount, ethRemaining);
+                    }
+                    spentToday += transferAmount;
+                    emit SpendingTracked(transferAmount, spentToday, dailySpendingCap);
+                }
+            }
         }
     }
 

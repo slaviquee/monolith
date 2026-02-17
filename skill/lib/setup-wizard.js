@@ -148,16 +148,21 @@ export async function runSetupWizard() {
  * Initialize the wallet with chain and profile configuration.
  * Calls POST /setup on the daemon.
  *
- * @param {object} params - { chainId: number, profile: string }
+ * @param {object} params - { chainId: number, profile: string, recoveryAddress?: string }
  * @returns {Promise<object>} Setup result with walletAddress, precompileAvailable, etc.
  */
 export async function initializeWallet(params) {
-  const { chainId, profile } = params;
+  const { chainId, profile, recoveryAddress } = params;
   if (!chainId || !profile) {
     throw new Error('chainId and profile are required');
   }
 
-  const response = await daemon.setup({ chainId, profile });
+  const body = { chainId, profile };
+  if (recoveryAddress) {
+    body.recoveryAddress = recoveryAddress;
+  }
+
+  const response = await daemon.setup(body);
   if (response.status !== 200) {
     throw new Error(
       response.data?.error || `Setup failed with status ${response.status}`

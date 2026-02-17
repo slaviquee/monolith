@@ -2,16 +2,14 @@ import Foundation
 
 /// POST /panic — Emergency freeze (no Touch ID — speed over ceremony).
 struct PanicHandler {
-    let policyEngine: PolicyEngine
+    let services: ServiceContainer
     let auditLogger: AuditLogger
-    let userOpBuilder: UserOpBuilder?
     let seManager: SecureEnclaveManager?
-    let bundlerClient: BundlerClient?
     let configStore: ConfigStore
 
     func handle(request: HTTPRequest) async -> HTTPResponse {
         // Freeze locally immediately
-        await policyEngine.freeze()
+        await services.policyEngine.freeze()
 
         // Persist frozen=true to DaemonConfig on disk via ConfigStore
         do {
@@ -35,29 +33,28 @@ struct PanicHandler {
         // Don't block the /panic response — local freeze is the priority
         let config = configStore.read()
         if let walletAddress = config.walletAddress,
-           let userOpBuilder = userOpBuilder,
-           let seManager = seManager,
-           let bundlerClient = bundlerClient
+           let seManager = seManager
         {
             let entryPoint = config.entryPointAddress
             let logger = auditLogger
+            let svc = services
             Task.detached {
                 do {
                     // freeze() selector = 0x62a5af3b
                     let freezeCalldata = Data([0x62, 0xa5, 0xaf, 0x3b])
 
-                    var userOp = try await userOpBuilder.build(
+                    var userOp = try await svc.userOpBuilder.build(
                         sender: walletAddress,
                         target: walletAddress,
                         value: 0,
                         calldata: freezeCalldata
                     )
 
-                    let hash = await userOpBuilder.computeHash(userOp: userOp)
+                    let hash = await svc.userOpBuilder.computeHash(userOp: userOp)
                     let rawSignature = try await seManager.sign(hash)
                     userOp.signature = SignatureUtils.normalizeSignature(rawSignature)
 
-                    let txHash = try await bundlerClient.sendUserOperation(
+                    let txHash = try await svc.bundlerClient.sendUserOperation(
                         userOp: userOp.toDict(),
                         entryPoint: entryPoint
                     )

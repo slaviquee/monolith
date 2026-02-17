@@ -4,9 +4,7 @@ import Foundation
 /// POST /setup/deploy — Deploy the wallet on-chain (requires funding).
 struct SetupHandler {
     let seManager: SecureEnclaveManager
-    let chainClient: ChainClient
-    let bundlerClient: BundlerClient
-    let userOpBuilder: UserOpBuilder
+    let services: ServiceContainer
     let auditLogger: AuditLogger
     let configStore: ConfigStore
 
@@ -58,9 +56,12 @@ struct SetupHandler {
         }
 
         // Run precompile probe
-        let precompileAvailable = await PrecompileProbe.probe(chainClient: chainClient)
+        let precompileAvailable = await PrecompileProbe.probe(chainClient: services.chainClient)
 
-        // Compute counterfactual wallet address
+        // Resolve profile BEFORE computing address (avoid stale config)
+        let resolvedProfile = SecurityProfile.forName(profile)!  // already validated above
+
+        // Compute counterfactual wallet address with explicit resolved values
         let signerXHex = SignatureUtils.toHex(pubKey.x)
         let signerYHex = SignatureUtils.toHex(pubKey.y)
 
@@ -71,7 +72,10 @@ struct SetupHandler {
                 factoryAddress: config.factoryAddress,
                 signerXHex: signerXHex,
                 signerYHex: signerYHex,
-                chainId: chainIdValue
+                chainId: chainIdValue,
+                profile: resolvedProfile,
+                recoveryAddress: recoveryAddress,
+                precompileAvailable: precompileAvailable
             )
         } catch {
             return .error(500, "Failed to compute wallet address: \(error.localizedDescription)")
@@ -91,6 +95,9 @@ struct SetupHandler {
         } catch {
             return .error(500, "Failed to persist config: \(error.localizedDescription)")
         }
+
+        // Reconfigure all chain-dependent services with updated config
+        services.reconfigure(config: configStore.read())
 
         await auditLogger.log(
             action: "setup",
@@ -126,7 +133,7 @@ struct SetupHandler {
         // Check wallet is funded
         let balance: UInt64
         do {
-            balance = try await chainClient.getBalance(address: walletAddress)
+            balance = try await services.chainClient.getBalance(address: walletAddress)
         } catch {
             return .error(500, "Failed to check balance: \(error.localizedDescription)")
         }
@@ -149,18 +156,22 @@ struct SetupHandler {
         // Build initCode: factory address (20 bytes) + createAccount calldata
         let signerXHex = SignatureUtils.toHex(deployPubKey.x)
         let signerYHex = SignatureUtils.toHex(deployPubKey.y)
+        let deployProfile = SecurityProfile.forName(config.activeProfile) ?? .balanced
+        // Normalize dailyStablecoinCap from 6-decimal to 18-decimal
+        let stableCapNormalized = UInt64(deployProfile.dailyStablecoinCap) * 1_000_000_000_000
         let initCode = buildInitCode(
             factoryAddress: config.factoryAddress,
             signerXHex: signerXHex,
             signerYHex: signerYHex,
             recoveryAddress: recoveryAddr,
-            dailyCap: SecurityProfile.forName(config.activeProfile)?.dailyEthCap ?? 250_000_000_000_000_000,
+            dailyCap: deployProfile.dailyEthCap,
+            dailyStablecoinCap: stableCapNormalized,
             usePrecompile: config.precompileAvailable ?? false
         )
 
         // Build and submit deployment UserOp
         do {
-            var userOp = try await userOpBuilder.build(
+            var userOp = try await services.userOpBuilder.build(
                 sender: walletAddress,
                 target: walletAddress,
                 value: 0,
@@ -169,12 +180,12 @@ struct SetupHandler {
             )
 
             // Sign the UserOp
-            let hash = await userOpBuilder.computeHash(userOp: userOp)
+            let hash = await services.userOpBuilder.computeHash(userOp: userOp)
             let rawSignature = try await seManager.sign(hash)
             userOp.signature = SignatureUtils.normalizeSignature(rawSignature)
 
             // Submit to bundler
-            let txHash = try await bundlerClient.sendUserOperation(
+            let txHash = try await services.bundlerClient.sendUserOperation(
                 userOp: userOp.toDict(),
                 entryPoint: config.entryPointAddress
             )
@@ -209,19 +220,22 @@ struct SetupHandler {
         factoryAddress: String,
         signerXHex: String,
         signerYHex: String,
-        chainId: UInt64
+        chainId: UInt64,
+        profile: SecurityProfile,
+        recoveryAddress: String?,
+        precompileAvailable: Bool
     ) async throws -> String {
-        let config = configStore.read()
-        // Call factory.getAddress(signerX, signerY, recoveryAddress, dailyCap, stablecoins, usePrecompile, salt)
-        let profile = SecurityProfile.forName(config.activeProfile) ?? .balanced
+        // Call factory.getAddress(signerX, signerY, recoveryAddress, dailyCap, dailyStablecoinCap,
+        //   stablecoins, stablecoinDecs, usePrecompile, salt)
+        // All values are passed explicitly — no reading from configStore.
 
         // Encode getAddress call
-        // selector for getAddress(uint256,uint256,address,uint256,address[],bool,bytes32)
-        let selector = "0x20047a51"
+        // selector for getAddress(uint256,uint256,address,uint256,uint256,address[],uint8[],bool,bytes32)
+        let selector = "0x" + Self.getAddressSelector
 
         let signerXClean = signerXHex.hasPrefix("0x") ? String(signerXHex.dropFirst(2)) : signerXHex
         let signerYClean = signerYHex.hasPrefix("0x") ? String(signerYHex.dropFirst(2)) : signerYHex
-        let recoveryClean = (config.recoveryAddress ?? "0000000000000000000000000000000000000000")
+        let recoveryClean = (recoveryAddress ?? "0000000000000000000000000000000000000000")
             .replacingOccurrences(of: "0x", with: "")
 
         var calldata = selector
@@ -234,17 +248,24 @@ struct SetupHandler {
         // dailyCap (uint256)
         let capHex = String(profile.dailyEthCap, radix: 16)
         calldata += String(repeating: "0", count: 64 - capHex.count) + capHex
-        // stablecoins array offset (dynamic type)
-        calldata += String(repeating: "0", count: 62) + "e0" // offset to stablecoins array
+        // dailyStablecoinCap (uint256) — profile.dailyStablecoinCap normalized to 18 decimals
+        let stableCapWei = UInt64(profile.dailyStablecoinCap) * 1_000_000_000_000 // 6-dec → 18-dec
+        let stableCapHex = String(stableCapWei, radix: 16)
+        calldata += String(repeating: "0", count: 64 - stableCapHex.count) + stableCapHex
+        // stablecoins array offset (dynamic type) = 9 * 32 = 288 = 0x120
+        calldata += String(repeating: "0", count: 61) + "120"
+        // stablecoinDecs array offset = 288 + 32 (stablecoins length word) = 320 = 0x140
+        calldata += String(repeating: "0", count: 61) + "140"
         // usePrecompile (bool)
-        let usePrecompile = config.precompileAvailable ?? false
-        calldata += String(repeating: "0", count: 63) + (usePrecompile ? "1" : "0")
+        calldata += String(repeating: "0", count: 63) + (precompileAvailable ? "1" : "0")
         // salt (bytes32 = 0)
         calldata += String(repeating: "0", count: 64)
         // stablecoins array: length = 0
         calldata += String(repeating: "0", count: 64)
+        // stablecoinDecs array: length = 0
+        calldata += String(repeating: "0", count: 64)
 
-        let result = try await chainClient.ethCall(to: factoryAddress, data: calldata)
+        let result = try await services.chainClient.ethCall(to: factoryAddress, data: calldata)
 
         // Result is a 32-byte address (padded)
         guard let resultData = SignatureUtils.fromHex(result), resultData.count >= 32 else {
@@ -262,45 +283,70 @@ struct SetupHandler {
         signerYHex: String,
         recoveryAddress: String,
         dailyCap: UInt64,
+        dailyStablecoinCap: UInt64,
         usePrecompile: Bool
     ) -> Data {
         // initCode = factoryAddress (20 bytes) + createAccount calldata
         let factoryClean = factoryAddress.replacingOccurrences(of: "0x", with: "")
         var initCode = SignatureUtils.fromHex("0x" + factoryClean) ?? Data()
 
-        // createAccount selector — same params as constructor
-        let selector = SignatureUtils.fromHex("0x03347661") ?? Data()
+        // createAccount selector
+        let selector = SignatureUtils.fromHex("0x" + Self.createAccountSelector) ?? Data()
         initCode.append(selector)
 
-        // Encode params (simplified — actual encoding matches factory ABI)
+        // Encode params matching factory ABI:
+        // createAccount(uint256,uint256,address,uint256,uint256,address[],uint8[],bool,bytes32)
         let signerXClean = signerXHex.hasPrefix("0x") ? String(signerXHex.dropFirst(2)) : signerXHex
         let signerYClean = signerYHex.hasPrefix("0x") ? String(signerYHex.dropFirst(2)) : signerYHex
         let recoveryClean = recoveryAddress.replacingOccurrences(of: "0x", with: "")
 
+        func pad64(_ hex: String) -> String {
+            String(repeating: "0", count: 64 - hex.count) + hex
+        }
+        func appendHex(_ hex: String) {
+            initCode.append(SignatureUtils.fromHex("0x" + hex) ?? Data())
+        }
+
         // signerX
-        let xPad = String(repeating: "0", count: 64 - signerXClean.count) + signerXClean
-        initCode.append(SignatureUtils.fromHex("0x" + xPad) ?? Data())
+        appendHex(pad64(signerXClean))
         // signerY
-        let yPad = String(repeating: "0", count: 64 - signerYClean.count) + signerYClean
-        initCode.append(SignatureUtils.fromHex("0x" + yPad) ?? Data())
+        appendHex(pad64(signerYClean))
         // recoveryAddress
-        let rPad = String(repeating: "0", count: 24) + recoveryClean
-        initCode.append(SignatureUtils.fromHex("0x" + rPad) ?? Data())
+        appendHex(String(repeating: "0", count: 24) + recoveryClean)
         // dailyCap
-        let capHex = String(dailyCap, radix: 16)
-        let cPad = String(repeating: "0", count: 64 - capHex.count) + capHex
-        initCode.append(SignatureUtils.fromHex("0x" + cPad) ?? Data())
-        // stablecoins array offset
-        let arrayOffset = String(repeating: "0", count: 62) + "e0"
-        initCode.append(SignatureUtils.fromHex("0x" + arrayOffset) ?? Data())
+        appendHex(pad64(String(dailyCap, radix: 16)))
+        // dailyStablecoinCap (18-decimal normalized)
+        appendHex(pad64(String(dailyStablecoinCap, radix: 16)))
+        // stablecoins array offset = 9 * 32 = 288 = 0x120
+        appendHex(pad64("120"))
+        // stablecoinDecs array offset = 288 + 32 = 320 = 0x140
+        appendHex(pad64("140"))
         // usePrecompile
-        let boolPad = String(repeating: "0", count: 63) + (usePrecompile ? "1" : "0")
-        initCode.append(SignatureUtils.fromHex("0x" + boolPad) ?? Data())
+        appendHex(String(repeating: "0", count: 63) + (usePrecompile ? "1" : "0"))
         // salt = 0
-        initCode.append(SignatureUtils.fromHex("0x" + String(repeating: "0", count: 64)) ?? Data())
-        // stablecoins array length = 0
-        initCode.append(SignatureUtils.fromHex("0x" + String(repeating: "0", count: 64)) ?? Data())
+        appendHex(String(repeating: "0", count: 64))
+        // stablecoins array: length = 0
+        appendHex(String(repeating: "0", count: 64))
+        // stablecoinDecs array: length = 0
+        appendHex(String(repeating: "0", count: 64))
 
         return initCode
     }
+
+    // MARK: - Factory Selectors
+
+    /// getAddress(uint256,uint256,address,uint256,uint256,address[],uint8[],bool,bytes32)
+    /// Computed from keccak256 of the function signature — must match compiled factory.
+    static let getAddressSelector: String = {
+        let sig = "getAddress(uint256,uint256,address,uint256,uint256,address[],uint8[],bool,bytes32)"
+        let hash = UserOpHash.keccak256(sig.data(using: .utf8)!)
+        return hash.prefix(4).map { String(format: "%02x", $0) }.joined()
+    }()
+
+    /// createAccount(uint256,uint256,address,uint256,uint256,address[],uint8[],bool,bytes32)
+    static let createAccountSelector: String = {
+        let sig = "createAccount(uint256,uint256,address,uint256,uint256,address[],uint8[],bool,bytes32)"
+        let hash = UserOpHash.keccak256(sig.data(using: .utf8)!)
+        return hash.prefix(4).map { String(format: "%02x", $0) }.joined()
+    }()
 }

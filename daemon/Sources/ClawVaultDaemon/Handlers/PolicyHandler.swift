@@ -8,7 +8,7 @@ import Foundation
 /// POST /policy/update — Modify policy (requires Touch ID).
 struct PolicyHandler {
     let configStore: ConfigStore
-    let policyEngine: PolicyEngine
+    let services: ServiceContainer
     let seManager: SecureEnclaveManager
     let auditLogger: AuditLogger
 
@@ -141,7 +141,7 @@ struct PolicyHandler {
             maxTxPerHour: updatedConfig.customMaxTxPerHour,
             maxSlippageBps: updatedConfig.customMaxSlippageBps
         )
-        await policyEngine.updateProfile(effectiveProfile)
+        await services.policyEngine.updateProfile(effectiveProfile)
 
         await auditLogger.log(
             action: "policy_update",

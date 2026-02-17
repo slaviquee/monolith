@@ -38,6 +38,11 @@ contract MockEntryPoint {
 /// @dev Simple ERC-20 mock for stablecoin testing.
 contract MockERC20 {
     mapping(address => uint256) public balanceOf;
+    uint8 public decimals;
+
+    constructor(uint8 _decimals) {
+        decimals = _decimals;
+    }
 
     function mint(address to, uint256 amount) external {
         balanceOf[to] += amount;
@@ -68,6 +73,7 @@ contract ClawVaultWalletTest is Test {
     uint256 constant NEW_SIGNER_Y = 0x2222222222222222222222222222222222222222222222222222222222222222;
     address constant RECOVERY_ADDR = address(0xBEEF);
     uint256 constant DAILY_CAP = 1 ether;
+    uint256 constant DAILY_STABLECOIN_CAP = 500e18; // 500 USDC normalized to 18 decimals
     address recipient = address(0xCAFE);
 
     function setUp() public {
@@ -82,12 +88,15 @@ contract ClawVaultWalletTest is Test {
         factory = new ClawVaultFactory(IEntryPoint(address(mockEntryPoint)));
 
         // Deploy wallet via factory
-        mockUSDC = new MockERC20();
+        mockUSDC = new MockERC20(6); // USDC has 6 decimals
         address[] memory stablecoins = new address[](1);
         stablecoins[0] = address(mockUSDC);
+        uint8[] memory stablecoinDecs = new uint8[](1);
+        stablecoinDecs[0] = 6;
 
         wallet = factory.createAccount(
-            SIGNER_X, SIGNER_Y, RECOVERY_ADDR, DAILY_CAP, stablecoins, true, bytes32(0)
+            SIGNER_X, SIGNER_Y, RECOVERY_ADDR, DAILY_CAP, DAILY_STABLECOIN_CAP,
+            stablecoins, stablecoinDecs, true, bytes32(0)
         );
 
         // Fund wallet
@@ -100,7 +109,9 @@ contract ClawVaultWalletTest is Test {
         assertEq(wallet.signerY(), SIGNER_Y);
         assertEq(wallet.recoveryAddress(), RECOVERY_ADDR);
         assertEq(wallet.dailySpendingCap(), DAILY_CAP);
+        assertEq(wallet.dailyStablecoinCap(), DAILY_STABLECOIN_CAP);
         assertTrue(wallet.knownStablecoins(address(mockUSDC)));
+        assertEq(wallet.stablecoinDecimals(address(mockUSDC)), 6);
         assertTrue(wallet.usePrecompile());
         assertFalse(wallet.frozen());
     }
@@ -134,7 +145,7 @@ contract ClawVaultWalletTest is Test {
         assertEq(address(0xBEAD).balance, 0.05 ether);
     }
 
-    // ─── Spending Cap ─────────────────────────────────────────────────────
+    // ─── ETH Spending Cap ─────────────────────────────────────────────────
     function test_SpendingCapEnforced() public {
         vm.prank(address(mockEntryPoint));
         wallet.execute(recipient, DAILY_CAP, "");
@@ -154,35 +165,106 @@ contract ClawVaultWalletTest is Test {
         wallet.execute(recipient, DAILY_CAP, "");
     }
 
+    // ─── Stablecoin Spending Cap (Separate Counter) ───────────────────────
+    function test_StablecoinCapSeparateFromEthCap() public {
+        mockUSDC.mint(address(wallet), 1000e6);
+
+        // Spend full ETH cap
+        vm.prank(address(mockEntryPoint));
+        wallet.execute(recipient, DAILY_CAP, "");
+        assertEq(wallet.spentToday(), DAILY_CAP);
+
+        // Stablecoin transfer should still succeed (separate counter)
+        bytes memory data = abi.encodeWithSelector(0xa9059cbb, recipient, 100e6); // 100 USDC
+        vm.prank(address(mockEntryPoint));
+        wallet.execute(address(mockUSDC), 0, data);
+
+        // 100 USDC * 10^12 = 100e18 normalized
+        assertEq(wallet.stablecoinSpentToday(), 100e18);
+        // ETH counter unchanged
+        assertEq(wallet.spentToday(), DAILY_CAP);
+    }
+
+    function test_StablecoinCapNormalizesDecimals() public {
+        mockUSDC.mint(address(wallet), 1000e6);
+
+        // Transfer 100 USDC (100_000_000 raw with 6 decimals)
+        bytes memory data = abi.encodeWithSelector(0xa9059cbb, recipient, 100e6);
+        vm.prank(address(mockEntryPoint));
+        wallet.execute(address(mockUSDC), 0, data);
+
+        // Should be normalized to 18 decimals: 100e6 * 10^12 = 100e18
+        assertEq(wallet.stablecoinSpentToday(), 100e18);
+    }
+
+    function test_StablecoinCapExceeded() public {
+        mockUSDC.mint(address(wallet), 10000e6);
+
+        // Spend 500 USDC (= full stablecoin cap at 500e18 normalized)
+        bytes memory data1 = abi.encodeWithSelector(0xa9059cbb, recipient, 500e6);
+        vm.prank(address(mockEntryPoint));
+        wallet.execute(address(mockUSDC), 0, data1);
+        assertEq(wallet.stablecoinSpentToday(), 500e18);
+
+        // Try to spend 1 more USDC — should fail
+        bytes memory data2 = abi.encodeWithSelector(0xa9059cbb, recipient, 1e6);
+        vm.prank(address(mockEntryPoint));
+        vm.expectRevert(abi.encodeWithSelector(ClawVaultWallet.DailyStablecoinCapExceeded.selector, 1e18, 0));
+        wallet.execute(address(mockUSDC), 0, data2);
+    }
+
+    function test_StablecoinCapDailyReset() public {
+        mockUSDC.mint(address(wallet), 10000e6);
+
+        bytes memory data = abi.encodeWithSelector(0xa9059cbb, recipient, 500e6);
+        vm.prank(address(mockEntryPoint));
+        wallet.execute(address(mockUSDC), 0, data);
+        assertEq(wallet.stablecoinSpentToday(), 500e18);
+
+        // Next day — counter resets
+        vm.warp(block.timestamp + 1 days);
+        vm.prank(address(mockEntryPoint));
+        wallet.execute(address(mockUSDC), 0, data);
+        assertEq(wallet.stablecoinSpentToday(), 500e18); // Reset then added 500e18
+    }
+
     function test_SpendingCapTracksERC20Transfers() public {
+        // Known stablecoin → tracks in stablecoin counter
         mockUSDC.mint(address(wallet), 1000e6);
         bytes memory data = abi.encodeWithSelector(0xa9059cbb, recipient, 500e6);
 
         vm.prank(address(mockEntryPoint));
         wallet.execute(address(mockUSDC), 0, data);
-        assertEq(wallet.spentToday(), 500e6);
-    }
-
-    function test_SpendingCapExceededByERC20() public {
-        mockUSDC.mint(address(wallet), 1000 ether);
-        bytes memory data = abi.encodeWithSelector(0xa9059cbb, recipient, DAILY_CAP + 1);
-
-        vm.prank(address(mockEntryPoint));
-        vm.expectRevert(abi.encodeWithSelector(ClawVaultWallet.DailyCapExceeded.selector, DAILY_CAP + 1, DAILY_CAP));
-        wallet.execute(address(mockUSDC), 0, data);
+        // Stablecoin tracked in stablecoin counter, NOT in ETH counter
+        assertEq(wallet.stablecoinSpentToday(), 500e18);
+        assertEq(wallet.spentToday(), 0);
     }
 
     function test_SpendingCapCombinedETHAndERC20() public {
-        mockUSDC.mint(address(wallet), 1000 ether);
+        // Unknown ERC-20 (not a stablecoin) → tracks in ETH counter
+        MockERC20 unknownToken = new MockERC20(18);
+        unknownToken.mint(address(wallet), 1000 ether);
+
         // Spend half cap as ETH
         vm.prank(address(mockEntryPoint));
         wallet.execute(recipient, DAILY_CAP / 2, "");
 
-        // Try to spend remaining + 1 as ERC20 — should fail
+        // Try to spend remaining + 1 as unknown ERC20 — should fail (uses ETH counter)
         bytes memory data = abi.encodeWithSelector(0xa9059cbb, recipient, (DAILY_CAP / 2) + 1);
         vm.prank(address(mockEntryPoint));
         vm.expectRevert();
-        wallet.execute(address(mockUSDC), 0, data);
+        wallet.execute(address(unknownToken), 0, data);
+    }
+
+    function test_SpendingCapExceededByERC20() public {
+        // Unknown token → counted against ETH cap
+        MockERC20 unknownToken = new MockERC20(18);
+        unknownToken.mint(address(wallet), 1000 ether);
+        bytes memory data = abi.encodeWithSelector(0xa9059cbb, recipient, DAILY_CAP + 1);
+
+        vm.prank(address(mockEntryPoint));
+        vm.expectRevert(abi.encodeWithSelector(ClawVaultWallet.DailyCapExceeded.selector, DAILY_CAP + 1, DAILY_CAP));
+        wallet.execute(address(unknownToken), 0, data);
     }
 
     // ─── Freeze ───────────────────────────────────────────────────────────
@@ -366,7 +448,12 @@ contract ClawVaultWalletTest is Test {
 
     function test_SetStablecoinRejectsDirectCall() public {
         vm.expectRevert(ClawVaultWallet.OnlyRecovery.selector);
-        wallet.setStablecoin(address(0x1234), true);
+        wallet.setStablecoin(address(0x1234), true, 18);
+    }
+
+    function test_SetDailyStablecoinCapRejectsDirectCall() public {
+        vm.expectRevert(ClawVaultWallet.OnlyRecovery.selector);
+        wallet.setDailyStablecoinCap(1000e18);
     }
 
     // ─── Receive ETH ──────────────────────────────────────────────────────
@@ -382,22 +469,28 @@ contract ClawVaultWalletTest is Test {
     function test_FactoryDeterministicAddress() public view {
         address[] memory stablecoins = new address[](1);
         stablecoins[0] = address(mockUSDC);
-        address predicted = factory.getAddress(SIGNER_X, SIGNER_Y, RECOVERY_ADDR, DAILY_CAP, stablecoins, true, bytes32(0));
+        uint8[] memory stablecoinDecs = new uint8[](1);
+        stablecoinDecs[0] = 6;
+        address predicted = factory.getAddress(SIGNER_X, SIGNER_Y, RECOVERY_ADDR, DAILY_CAP, DAILY_STABLECOIN_CAP, stablecoins, stablecoinDecs, true, bytes32(0));
         assertEq(predicted, address(wallet));
     }
 
     function test_FactoryCannotRedeployDuplicate() public {
         address[] memory stablecoins = new address[](1);
         stablecoins[0] = address(mockUSDC);
+        uint8[] memory stablecoinDecs = new uint8[](1);
+        stablecoinDecs[0] = 6;
         vm.expectRevert(ClawVaultFactory.WalletAlreadyDeployed.selector);
-        factory.createAccount(SIGNER_X, SIGNER_Y, RECOVERY_ADDR, DAILY_CAP, stablecoins, true, bytes32(0));
+        factory.createAccount(SIGNER_X, SIGNER_Y, RECOVERY_ADDR, DAILY_CAP, DAILY_STABLECOIN_CAP, stablecoins, stablecoinDecs, true, bytes32(0));
     }
 
     function test_FactoryDifferentSaltDifferentAddress() public view {
         address[] memory stablecoins = new address[](1);
         stablecoins[0] = address(mockUSDC);
-        address addr1 = factory.getAddress(SIGNER_X, SIGNER_Y, RECOVERY_ADDR, DAILY_CAP, stablecoins, true, bytes32(0));
-        address addr2 = factory.getAddress(SIGNER_X, SIGNER_Y, RECOVERY_ADDR, DAILY_CAP, stablecoins, true, bytes32(uint256(1)));
+        uint8[] memory stablecoinDecs = new uint8[](1);
+        stablecoinDecs[0] = 6;
+        address addr1 = factory.getAddress(SIGNER_X, SIGNER_Y, RECOVERY_ADDR, DAILY_CAP, DAILY_STABLECOIN_CAP, stablecoins, stablecoinDecs, true, bytes32(0));
+        address addr2 = factory.getAddress(SIGNER_X, SIGNER_Y, RECOVERY_ADDR, DAILY_CAP, DAILY_STABLECOIN_CAP, stablecoins, stablecoinDecs, true, bytes32(uint256(1)));
         assertTrue(addr1 != addr2);
     }
 
@@ -462,7 +555,7 @@ contract ClawVaultWalletTest is Test {
 
     function test_SetStablecoinViaSelfCallReverts() public {
         address newStable = address(0x5555);
-        bytes memory callData = abi.encodeWithSelector(ClawVaultWallet.setStablecoin.selector, newStable, true);
+        bytes memory callData = abi.encodeWithSelector(ClawVaultWallet.setStablecoin.selector, newStable, true, uint8(18));
         vm.prank(address(mockEntryPoint));
         vm.expectRevert();
         wallet.execute(address(wallet), 0, callData);
@@ -478,8 +571,15 @@ contract ClawVaultWalletTest is Test {
     function test_SetStablecoinByRecovery() public {
         address newStable = address(0x5555);
         vm.prank(RECOVERY_ADDR);
-        wallet.setStablecoin(newStable, true);
+        wallet.setStablecoin(newStable, true, 18);
         assertTrue(wallet.knownStablecoins(newStable));
+        assertEq(wallet.stablecoinDecimals(newStable), 18);
+    }
+
+    function test_SetDailyStablecoinCapByRecovery() public {
+        vm.prank(RECOVERY_ADDR);
+        wallet.setDailyStablecoinCap(1000e18);
+        assertEq(wallet.dailyStablecoinCap(), 1000e18);
     }
 
     // ─── Zero Value ERC-20 Transfer ──────────────────────────────────────
@@ -487,7 +587,7 @@ contract ClawVaultWalletTest is Test {
         bytes memory data = abi.encodeWithSelector(0xa9059cbb, recipient, uint256(0));
         vm.prank(address(mockEntryPoint));
         wallet.execute(address(mockUSDC), 0, data);
-        assertEq(wallet.spentToday(), 0);
+        assertEq(wallet.stablecoinSpentToday(), 0);
     }
 
     // ─── Daimo Fallback Path ─────────────────────────────────────────────
@@ -495,8 +595,11 @@ contract ClawVaultWalletTest is Test {
         // Deploy a wallet with usePrecompile=false
         address[] memory stablecoins = new address[](1);
         stablecoins[0] = address(mockUSDC);
+        uint8[] memory stablecoinDecs = new uint8[](1);
+        stablecoinDecs[0] = 6;
         ClawVaultWallet fallbackWallet = factory.createAccount(
-            SIGNER_X, SIGNER_Y, RECOVERY_ADDR, DAILY_CAP, stablecoins, false, bytes32(uint256(99))
+            SIGNER_X, SIGNER_Y, RECOVERY_ADDR, DAILY_CAP, DAILY_STABLECOIN_CAP,
+            stablecoins, stablecoinDecs, false, bytes32(uint256(99))
         );
         vm.deal(address(fallbackWallet), 10 ether);
         assertFalse(fallbackWallet.usePrecompile());
@@ -526,15 +629,17 @@ contract ClawVaultWalletTest is Test {
 
         vm.prank(address(mockEntryPoint));
         wallet.execute(address(mockUSDC), 0, data);
-        assertEq(wallet.spentToday(), 500e6);
+        // Known stablecoin → stablecoin counter
+        assertEq(wallet.stablecoinSpentToday(), 500e18);
     }
 
     function test_SpendingCapExceededByTransferFrom() public {
-        mockUSDC.mint(address(wallet), 1000 ether);
-        bytes memory data = abi.encodeWithSelector(0x23b872dd, address(wallet), recipient, DAILY_CAP + 1);
+        mockUSDC.mint(address(wallet), 10000e6);
+        // 501 USDC normalized = 501e18 > 500e18 cap
+        bytes memory data = abi.encodeWithSelector(0x23b872dd, address(wallet), recipient, 501e6);
 
         vm.prank(address(mockEntryPoint));
-        vm.expectRevert(abi.encodeWithSelector(ClawVaultWallet.DailyCapExceeded.selector, DAILY_CAP + 1, DAILY_CAP));
+        vm.expectRevert(abi.encodeWithSelector(ClawVaultWallet.DailyStablecoinCapExceeded.selector, 501e18, DAILY_STABLECOIN_CAP));
         wallet.execute(address(mockUSDC), 0, data);
     }
 
@@ -542,22 +647,28 @@ contract ClawVaultWalletTest is Test {
     function test_RejectsZeroRecoveryAddress() public {
         address[] memory stablecoins = new address[](1);
         stablecoins[0] = address(mockUSDC);
+        uint8[] memory stablecoinDecs = new uint8[](1);
+        stablecoinDecs[0] = 6;
         vm.expectRevert(ClawVaultWallet.InvalidRecoveryAddress.selector);
-        factory.createAccount(SIGNER_X, SIGNER_Y, address(0), DAILY_CAP, stablecoins, true, bytes32(uint256(42)));
+        factory.createAccount(SIGNER_X, SIGNER_Y, address(0), DAILY_CAP, DAILY_STABLECOIN_CAP, stablecoins, stablecoinDecs, true, bytes32(uint256(42)));
     }
 
     function test_RejectsZeroSignerX() public {
         address[] memory stablecoins = new address[](1);
         stablecoins[0] = address(mockUSDC);
+        uint8[] memory stablecoinDecs = new uint8[](1);
+        stablecoinDecs[0] = 6;
         vm.expectRevert(ClawVaultWallet.InvalidPublicKey.selector);
-        factory.createAccount(0, SIGNER_Y, RECOVERY_ADDR, DAILY_CAP, stablecoins, true, bytes32(uint256(43)));
+        factory.createAccount(0, SIGNER_Y, RECOVERY_ADDR, DAILY_CAP, DAILY_STABLECOIN_CAP, stablecoins, stablecoinDecs, true, bytes32(uint256(43)));
     }
 
     function test_RejectsZeroSignerY() public {
         address[] memory stablecoins = new address[](1);
         stablecoins[0] = address(mockUSDC);
+        uint8[] memory stablecoinDecs = new uint8[](1);
+        stablecoinDecs[0] = 6;
         vm.expectRevert(ClawVaultWallet.InvalidPublicKey.selector);
-        factory.createAccount(SIGNER_X, 0, RECOVERY_ADDR, DAILY_CAP, stablecoins, true, bytes32(uint256(44)));
+        factory.createAccount(SIGNER_X, 0, RECOVERY_ADDR, DAILY_CAP, DAILY_STABLECOIN_CAP, stablecoins, stablecoinDecs, true, bytes32(uint256(44)));
     }
 
     // ─── Helpers ──────────────────────────────────────────────────────────

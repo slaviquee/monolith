@@ -58,15 +58,17 @@ async function main() {
       console.log('Policy: not yet configured');
     }
 
-    // Parse CLI args: node scripts/setup.js <action> [chainId] [profile]
-    const [, , action, chainId, profile] = process.argv;
+    // Parse CLI args: node scripts/setup.js <action> [chainId] [profile] [recoveryAddress]
+    const [, , action, chainId, profile, recoveryAddress] = process.argv;
 
     if (action === 'init' && chainId && profile) {
       console.log(`\nInitializing wallet on chain ${chainId} with profile "${profile}"...`);
-      const initResult = await initializeWallet({
-        chainId: Number(chainId),
-        profile,
-      });
+      const initParams = { chainId: Number(chainId), profile };
+      if (recoveryAddress) {
+        initParams.recoveryAddress = recoveryAddress;
+        console.log(`Recovery address: ${recoveryAddress}`);
+      }
+      const initResult = await initializeWallet(initParams);
       console.log(`Counterfactual address: ${initResult.walletAddress}`);
       console.log(`Precompile available: ${initResult.precompileAvailable}`);
       console.log('Send ETH to this address, then run: node scripts/setup.js deploy');
@@ -77,9 +79,10 @@ async function main() {
       console.log(`UserOp hash: ${deployResult.userOpHash}`);
     } else if (status.wallet && !status.wallet.deployed) {
       console.log('\nWallet not yet deployed.');
-      console.log('To initialize: node scripts/setup.js init <chainId> <profile>');
+      console.log('To initialize: node scripts/setup.js init <chainId> <profile> [recoveryAddress]');
       console.log('  chainId: 1 (Ethereum) or 8453 (Base)');
       console.log('  profile: "balanced" or "autonomous"');
+      console.log('  recoveryAddress: (optional) EOA for emergency recovery');
     }
   } catch (err) {
     console.error(err.message);

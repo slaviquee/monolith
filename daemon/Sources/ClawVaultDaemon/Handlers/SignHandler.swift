@@ -25,11 +25,8 @@ private final class SignRateLimiter: @unchecked Sendable {
 
 /// POST /sign — Sign an intent (policy-checked, gas-preflighted).
 struct SignHandler {
-    let policyEngine: PolicyEngine
-    let userOpBuilder: UserOpBuilder
+    let services: ServiceContainer
     let seManager: SecureEnclaveManager
-    let bundlerClient: BundlerClient
-    let chainClient: ChainClient
     let approvalManager: ApprovalManager
     let auditLogger: AuditLogger
     let configStore: ConfigStore
@@ -98,7 +95,7 @@ struct SignHandler {
         }
 
         // Policy evaluation
-        let decision = await policyEngine.evaluate(
+        let decision = await services.policyEngine.evaluate(
             target: target,
             calldata: calldata,
             value: value,
@@ -153,15 +150,13 @@ struct SignHandler {
                 }
             } else {
                 // No approval code — create a new approval request
-                let stablecoinRegistry = StablecoinRegistry()
-                let protocolRegistry = ProtocolRegistry(profile: config.activeProfile)
                 let decoded = CalldataDecoder.decode(
                     calldata: calldata,
                     target: target,
                     value: value,
                     chainId: chainId,
-                    stablecoinRegistry: stablecoinRegistry,
-                    protocolRegistry: protocolRegistry
+                    stablecoinRegistry: services.stablecoinRegistry,
+                    protocolRegistry: services.protocolRegistry
                 )
 
                 let (code, approvalHash) = await approvalManager.createApproval(
@@ -205,7 +200,7 @@ struct SignHandler {
 
         // Build, sign, and submit UserOp
         do {
-            var userOp = try await userOpBuilder.build(
+            var userOp = try await services.userOpBuilder.build(
                 sender: walletAddress,
                 target: target,
                 value: value,
@@ -225,7 +220,7 @@ struct SignHandler {
                 walletAddress: walletAddress,
                 gasEstimate: gasEstimate,
                 maxFeePerGas: actualFees.maxFeePerGas,
-                chainClient: chainClient
+                chainClient: services.chainClient
             )
 
             if !preflight.sufficient {
@@ -233,12 +228,12 @@ struct SignHandler {
             }
 
             // Compute userOpHash and sign
-            let hash = await userOpBuilder.computeHash(userOp: userOp)
+            let hash = await services.userOpBuilder.computeHash(userOp: userOp)
             let rawSignature = try await seManager.sign(hash)
             userOp.signature = SignatureUtils.normalizeSignature(rawSignature)
 
             // Submit to bundler
-            let txHash = try await bundlerClient.sendUserOperation(
+            let txHash = try await services.bundlerClient.sendUserOperation(
                 userOp: userOp.toDict(),
                 entryPoint: config.entryPointAddress
             )
@@ -248,13 +243,12 @@ struct SignHandler {
             if calldata.count >= 68 {
                 let selectorHex = calldata.prefix(4).map { String(format: "%02x", $0) }.joined()
                 if selectorHex == "a9059cbb" {
-                    let registry = StablecoinRegistry()
-                    if registry.isStablecoin(chainId: chainId, address: target) {
+                    if services.stablecoinRegistry.isStablecoin(chainId: chainId, address: target) {
                         stablecoinAmount = CalldataDecoder.dataToUInt64(Data(calldata[36..<68]))
                     }
                 }
             }
-            await policyEngine.recordTransaction(ethAmount: value, stablecoinAmount: stablecoinAmount)
+            await services.policyEngine.recordTransaction(ethAmount: value, stablecoinAmount: stablecoinAmount)
 
             await auditLogger.log(
                 action: "sign",

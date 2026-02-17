@@ -6,7 +6,7 @@ import Foundation
 
 /// POST /allowlist — Modify allowlist (requires Touch ID).
 struct AllowlistHandler {
-    let policyEngine: PolicyEngine
+    let services: ServiceContainer
     let seManager: SecureEnclaveManager
     let auditLogger: AuditLogger
     let configStore: ConfigStore
@@ -69,13 +69,13 @@ struct AllowlistHandler {
 
         // 4. Apply changes to policy engine
         if action == "add" {
-            await policyEngine.addToAllowlist(address)
+            await services.policyEngine.addToAllowlist(address)
         } else {
-            await policyEngine.removeFromAllowlist(address)
+            await services.policyEngine.removeFromAllowlist(address)
         }
 
         // 5. Persist allowlist to config
-        let currentAllowlist = await policyEngine.currentAllowlist
+        let currentAllowlist = await services.policyEngine.currentAllowlist
         do {
             try configStore.update { cfg in
                 cfg.allowlistedAddresses = Array(currentAllowlist)

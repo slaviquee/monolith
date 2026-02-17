@@ -3,9 +3,7 @@ import Foundation
 /// GET /capabilities — Return current limits, budgets, gas status.
 struct CapabilitiesHandler {
     let configStore: ConfigStore
-    let policyEngine: PolicyEngine
-    let chainClient: ChainClient
-    let protocolRegistry: ProtocolRegistry
+    let services: ServiceContainer
 
     func handle(request: HTTPRequest) async -> HTTPResponse {
         let config = configStore.read()
@@ -23,14 +21,14 @@ struct CapabilitiesHandler {
             maxTxPerHour: config.customMaxTxPerHour,
             maxSlippageBps: config.customMaxSlippageBps
         )
-        let budgets = await policyEngine.remainingBudgets()
+        let budgets = await services.policyEngine.remainingBudgets()
         let gasStatus = await GasPreflight.gasStatus(
             walletAddress: walletAddress,
-            chainClient: chainClient
+            chainClient: services.chainClient
         )
-        let isFrozen = await policyEngine.isFrozen
-        let allowlist = await policyEngine.currentAllowlist
-        let protocols = protocolRegistry.protocols(forChain: config.homeChainId)
+        let isFrozen = await services.policyEngine.isFrozen
+        let allowlist = await services.policyEngine.currentAllowlist
+        let protocols = services.protocolRegistry.protocols(forChain: config.homeChainId)
 
         return .json(200, [
             "profile": profile.name,

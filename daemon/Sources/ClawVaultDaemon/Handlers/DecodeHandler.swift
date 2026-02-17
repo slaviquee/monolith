@@ -3,8 +3,7 @@ import Foundation
 /// POST /decode — Decode intent into human-readable summary (no signing).
 struct DecodeHandler {
     let configStore: ConfigStore
-    let stablecoinRegistry: StablecoinRegistry
-    let protocolRegistry: ProtocolRegistry
+    let services: ServiceContainer
 
     func handle(request: HTTPRequest) async -> HTTPResponse {
         guard let body = request.body,
@@ -26,8 +25,8 @@ struct DecodeHandler {
             target: target,
             value: value,
             chainId: chainId,
-            stablecoinRegistry: stablecoinRegistry,
-            protocolRegistry: protocolRegistry
+            stablecoinRegistry: services.stablecoinRegistry,
+            protocolRegistry: services.protocolRegistry
         )
 
         return .json(200, [
