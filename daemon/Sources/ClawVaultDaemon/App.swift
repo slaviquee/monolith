@@ -10,7 +10,7 @@ struct ClawVaultDaemon {
         print("[ClawVault] Starting daemon v0.1.0")
 
         // Load or create config
-        var config: DaemonConfig
+        let configStore: ConfigStore
         do {
             // Ensure config directory exists
             let fm = FileManager.default
@@ -20,12 +20,16 @@ struct ClawVaultDaemon {
                     [.posixPermissions: 0o700], ofItemAtPath: DaemonConfig.configDir.path)
             }
 
-            config = (try? DaemonConfig.load()) ?? DaemonConfig.defaultConfig()
+            let config = (try? DaemonConfig.load()) ?? DaemonConfig.defaultConfig()
             try config.save()
+            configStore = ConfigStore(config)
         } catch {
             print("[ClawVault] ERROR: Failed to initialize config: \(error)")
             return
         }
+
+        // Read initial config snapshot for startup
+        var config = configStore.read()
 
         // Initialize Secure Enclave
         let seManager = SecureEnclaveManager()
@@ -54,19 +58,29 @@ struct ClawVaultDaemon {
         // Probe P-256 precompile at 0x100 and cache result
         if config.precompileAvailable == nil {
             let precompileAvailable = await PrecompileProbe.probe(chainClient: chainClient)
-            config.precompileAvailable = precompileAvailable
-            try? config.save()
+            try? configStore.update { $0.precompileAvailable = precompileAvailable }
+            config = configStore.read()
             print("[ClawVault] Precompile probe: \(precompileAvailable ? "available" : "not available")")
         }
 
-        // Initialize policy engine
-        let profile = SecurityProfile.forName(config.activeProfile) ?? .balanced
+        // Initialize policy engine with overrides applied
+        let baseProfile = SecurityProfile.forName(config.activeProfile) ?? .balanced
+        let effectiveProfile = baseProfile.withOverrides(
+            perTxStablecoinCap: config.customPerTxStablecoinCap,
+            dailyStablecoinCap: config.customDailyStablecoinCap,
+            perTxEthCap: config.customPerTxEthCap,
+            dailyEthCap: config.customDailyEthCap,
+            maxTxPerHour: config.customMaxTxPerHour,
+            maxSlippageBps: config.customMaxSlippageBps
+        )
         let stablecoinRegistry = StablecoinRegistry()
         let protocolRegistry = ProtocolRegistry(profile: config.activeProfile)
+        let persistedAllowlist = Set((config.allowlistedAddresses ?? []).map { $0.lowercased() })
         let policyEngine = PolicyEngine(
-            profile: profile,
+            profile: effectiveProfile,
             protocolRegistry: protocolRegistry,
             stablecoinRegistry: stablecoinRegistry,
+            allowlistedAddresses: persistedAllowlist,
             frozen: config.frozen,
             chainClient: chainClient,
             chainId: config.homeChainId,
@@ -92,14 +106,14 @@ struct ClawVaultDaemon {
         }
 
         // Address
-        let addressHandler = AddressHandler(config: config, seManager: seManager)
+        let addressHandler = AddressHandler(configStore: configStore, seManager: seManager)
         router.register("GET", "/address") { req in
             await addressHandler.handle(request: req)
         }
 
         // Capabilities
         let capsHandler = CapabilitiesHandler(
-            config: config,
+            configStore: configStore,
             policyEngine: policyEngine,
             chainClient: chainClient,
             protocolRegistry: protocolRegistry
@@ -110,7 +124,7 @@ struct ClawVaultDaemon {
 
         // Decode
         let decodeHandler = DecodeHandler(
-            config: config,
+            configStore: configStore,
             stablecoinRegistry: stablecoinRegistry,
             protocolRegistry: protocolRegistry
         )
@@ -127,7 +141,7 @@ struct ClawVaultDaemon {
             chainClient: chainClient,
             approvalManager: approvalManager,
             auditLogger: auditLogger,
-            config: config
+            configStore: configStore
         )
         router.register("POST", "/sign") { req in
             await signHandler.handle(request: req)
@@ -135,7 +149,7 @@ struct ClawVaultDaemon {
 
         // Policy
         let policyHandler = PolicyHandler(
-            config: config,
+            configStore: configStore,
             policyEngine: policyEngine,
             seManager: seManager,
             auditLogger: auditLogger
@@ -154,7 +168,7 @@ struct ClawVaultDaemon {
             bundlerClient: bundlerClient,
             userOpBuilder: userOpBuilder,
             auditLogger: auditLogger,
-            config: config
+            configStore: configStore
         )
         router.register("POST", "/setup") { req in
             await setupHandler.handleSetup(request: req)
@@ -167,7 +181,8 @@ struct ClawVaultDaemon {
         let allowlistHandler = AllowlistHandler(
             policyEngine: policyEngine,
             seManager: seManager,
-            auditLogger: auditLogger
+            auditLogger: auditLogger,
+            configStore: configStore
         )
         router.register("POST", "/allowlist") { req in
             await allowlistHandler.handle(request: req)
@@ -177,11 +192,10 @@ struct ClawVaultDaemon {
         let panicHandler = PanicHandler(
             policyEngine: policyEngine,
             auditLogger: auditLogger,
-            configUpdater: { cfg in cfg.frozen = true },
             userOpBuilder: userOpBuilder,
             seManager: seManager,
             bundlerClient: bundlerClient,
-            config: config
+            configStore: configStore
         )
         router.register("POST", "/panic") { req in
             await panicHandler.handle(request: req)

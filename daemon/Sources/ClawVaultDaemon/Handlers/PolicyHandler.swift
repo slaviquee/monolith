@@ -7,14 +7,22 @@ import Foundation
 /// GET /policy — Return current policy configuration.
 /// POST /policy/update — Modify policy (requires Touch ID).
 struct PolicyHandler {
-    let config: DaemonConfig
+    let configStore: ConfigStore
     let policyEngine: PolicyEngine
     let seManager: SecureEnclaveManager
     let auditLogger: AuditLogger
-    var configUpdater: ((inout DaemonConfig) -> Void)?
 
     func handleGet(request: HTTPRequest) async -> HTTPResponse {
-        let profile = SecurityProfile.forName(config.activeProfile) ?? .balanced
+        let config = configStore.read()
+        let baseProfile = SecurityProfile.forName(config.activeProfile) ?? .balanced
+        let profile = baseProfile.withOverrides(
+            perTxStablecoinCap: config.customPerTxStablecoinCap,
+            dailyStablecoinCap: config.customDailyStablecoinCap,
+            perTxEthCap: config.customPerTxEthCap,
+            dailyEthCap: config.customDailyEthCap,
+            maxTxPerHour: config.customMaxTxPerHour,
+            maxSlippageBps: config.customMaxSlippageBps
+        )
 
         return .json(200, [
             "profile": profile.name,
@@ -87,44 +95,43 @@ struct PolicyHandler {
             return .error(403, "Touch ID verification failed")
         }
 
-        // 4. Apply policy changes — persist all supported fields
-        var updatedConfig = config
-
+        // 4. Apply policy changes — persist all supported fields via ConfigStore
         if let profileName = newProfile {
             guard SecurityProfile.forName(profileName) != nil else {
                 return .error(400, "Unknown profile: \(profileName). Must be 'balanced' or 'autonomous'.")
             }
-            updatedConfig.activeProfile = profileName
         }
 
-        // Apply custom limit overrides
-        if let v = json["perTxStablecoinCap"] as? UInt64 {
-            updatedConfig.customPerTxStablecoinCap = v
-        }
-        if let v = json["dailyStablecoinCap"] as? UInt64 {
-            updatedConfig.customDailyStablecoinCap = v
-        }
-        if let v = json["perTxEthCap"] as? UInt64 {
-            updatedConfig.customPerTxEthCap = v
-        }
-        if let v = json["dailyEthCap"] as? UInt64 {
-            updatedConfig.customDailyEthCap = v
-        }
-        if let v = json["maxTxPerHour"] as? Int {
-            updatedConfig.customMaxTxPerHour = v
-        }
-        if let v = json["maxSlippageBps"] as? Int {
-            updatedConfig.customMaxSlippageBps = v
-        }
-
-        // Persist to disk
         do {
-            try updatedConfig.save()
+            try configStore.update { updatedConfig in
+                if let profileName = newProfile {
+                    updatedConfig.activeProfile = profileName
+                }
+                if let v = json["perTxStablecoinCap"] as? UInt64 {
+                    updatedConfig.customPerTxStablecoinCap = v
+                }
+                if let v = json["dailyStablecoinCap"] as? UInt64 {
+                    updatedConfig.customDailyStablecoinCap = v
+                }
+                if let v = json["perTxEthCap"] as? UInt64 {
+                    updatedConfig.customPerTxEthCap = v
+                }
+                if let v = json["dailyEthCap"] as? UInt64 {
+                    updatedConfig.customDailyEthCap = v
+                }
+                if let v = json["maxTxPerHour"] as? Int {
+                    updatedConfig.customMaxTxPerHour = v
+                }
+                if let v = json["maxSlippageBps"] as? Int {
+                    updatedConfig.customMaxSlippageBps = v
+                }
+            }
         } catch {
             return .error(500, "Failed to persist config: \(error.localizedDescription)")
         }
 
         // Update the runtime PolicyEngine with the new profile + overrides
+        let updatedConfig = configStore.read()
         let baseProfile = SecurityProfile.forName(updatedConfig.activeProfile) ?? .balanced
         let effectiveProfile = baseProfile.withOverrides(
             perTxStablecoinCap: updatedConfig.customPerTxStablecoinCap,

@@ -8,7 +8,7 @@ struct SetupHandler {
     let bundlerClient: BundlerClient
     let userOpBuilder: UserOpBuilder
     let auditLogger: AuditLogger
-    var config: DaemonConfig
+    let configStore: ConfigStore
 
     func handleSetup(request: HTTPRequest) async -> HTTPResponse {
         guard let body = request.body,
@@ -28,6 +28,19 @@ struct SetupHandler {
         guard SecurityProfile.forName(profile) != nil else {
             return .error(400, "Invalid profile: must be 'balanced' or 'autonomous'")
         }
+
+        // Validate recoveryAddress if provided — must be non-zero
+        let recoveryAddress = json["recoveryAddress"] as? String
+        if let recovery = recoveryAddress {
+            let cleaned = recovery.replacingOccurrences(of: "0x", with: "").lowercased()
+            guard cleaned.count == 40,
+                cleaned != String(repeating: "0", count: 40)
+            else {
+                return .error(400, "recoveryAddress must be a valid non-zero Ethereum address")
+            }
+        }
+
+        let config = configStore.read()
 
         // Validate factory address is configured
         guard !config.factoryAddress.isEmpty,
@@ -64,15 +77,17 @@ struct SetupHandler {
             return .error(500, "Failed to compute wallet address: \(error.localizedDescription)")
         }
 
-        // Update config
-        var updatedConfig = config
-        updatedConfig.homeChainId = chainIdValue
-        updatedConfig.activeProfile = profile
-        updatedConfig.walletAddress = walletAddress
-        updatedConfig.precompileAvailable = precompileAvailable
-
+        // Update config via ConfigStore (shared reference)
         do {
-            try updatedConfig.save()
+            try configStore.update { cfg in
+                cfg.homeChainId = chainIdValue
+                cfg.activeProfile = profile
+                cfg.walletAddress = walletAddress
+                cfg.precompileAvailable = precompileAvailable
+                if let recovery = recoveryAddress {
+                    cfg.recoveryAddress = recovery
+                }
+            }
         } catch {
             return .error(500, "Failed to persist config: \(error.localizedDescription)")
         }
@@ -93,8 +108,19 @@ struct SetupHandler {
     }
 
     func handleDeploy(request: HTTPRequest) async -> HTTPResponse {
+        let config = configStore.read()
+
         guard let walletAddress = config.walletAddress else {
             return .error(400, "Run /setup first to configure the wallet")
+        }
+
+        // Validate recoveryAddress is set and non-zero
+        let recoveryAddr = config.recoveryAddress ?? ""
+        let recoveryCleanCheck = recoveryAddr.replacingOccurrences(of: "0x", with: "").lowercased()
+        guard !recoveryCleanCheck.isEmpty,
+            recoveryCleanCheck != String(repeating: "0", count: 40)
+        else {
+            return .error(400, "recoveryAddress not configured. Pass it via POST /setup first.")
         }
 
         // Check wallet is funded
@@ -127,7 +153,7 @@ struct SetupHandler {
             factoryAddress: config.factoryAddress,
             signerXHex: signerXHex,
             signerYHex: signerYHex,
-            recoveryAddress: config.recoveryAddress ?? "0x0000000000000000000000000000000000000000",
+            recoveryAddress: recoveryAddr,
             dailyCap: SecurityProfile.forName(config.activeProfile)?.dailyEthCap ?? 250_000_000_000_000_000,
             usePrecompile: config.precompileAvailable ?? false
         )
@@ -185,14 +211,13 @@ struct SetupHandler {
         signerYHex: String,
         chainId: UInt64
     ) async throws -> String {
+        let config = configStore.read()
         // Call factory.getAddress(signerX, signerY, recoveryAddress, dailyCap, stablecoins, usePrecompile, salt)
-        // selector: getAddress(...) — we compute it from the factory ABI
-        // For now, use a simplified eth_call to the factory
         let profile = SecurityProfile.forName(config.activeProfile) ?? .balanced
 
         // Encode getAddress call
         // selector for getAddress(uint256,uint256,address,uint256,address[],bool,bytes32)
-        let selector = "0x8cb84e18"
+        let selector = "0x20047a51"
 
         let signerXClean = signerXHex.hasPrefix("0x") ? String(signerXHex.dropFirst(2)) : signerXHex
         let signerYClean = signerYHex.hasPrefix("0x") ? String(signerYHex.dropFirst(2)) : signerYHex
@@ -244,7 +269,7 @@ struct SetupHandler {
         var initCode = SignatureUtils.fromHex("0x" + factoryClean) ?? Data()
 
         // createAccount selector — same params as constructor
-        let selector = SignatureUtils.fromHex("0x5fbfb9cf") ?? Data()
+        let selector = SignatureUtils.fromHex("0x03347661") ?? Data()
         initCode.append(selector)
 
         // Encode params (simplified — actual encoding matches factory ABI)

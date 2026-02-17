@@ -32,7 +32,7 @@ struct SignHandler {
     let chainClient: ChainClient
     let approvalManager: ApprovalManager
     let auditLogger: AuditLogger
-    let config: DaemonConfig
+    let configStore: ConfigStore
 
     /// D12: Rate limiter — 30 requests per minute
     private static let rateLimiter = SignRateLimiter()
@@ -42,6 +42,8 @@ struct SignHandler {
         guard SignHandler.rateLimiter.checkAndRecord() else {
             return .error(429, "Rate limited: max 30 sign requests per minute")
         }
+
+        let config = configStore.read()
 
         // Parse intent
         guard let body = request.body,
@@ -56,7 +58,7 @@ struct SignHandler {
         let calldata = SignatureUtils.fromHex(calldataHex) ?? Data()
         // Overflow detection: reject if value string exceeds UInt64 range
         guard let value = UInt64(valueStr) else {
-            return .error(400, "Value overflows UInt64: \(valueStr)")
+            return .error(400, "Value overflows UInt64 (~18.4 ETH max, MVP limitation): \(valueStr)")
         }
 
         // D14: Warn on forbidden intent fields

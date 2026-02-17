@@ -2,7 +2,7 @@ import Foundation
 
 /// POST /decode — Decode intent into human-readable summary (no signing).
 struct DecodeHandler {
-    let config: DaemonConfig
+    let configStore: ConfigStore
     let stablecoinRegistry: StablecoinRegistry
     let protocolRegistry: ProtocolRegistry
 
@@ -16,6 +16,7 @@ struct DecodeHandler {
             return .error(400, "Missing required fields: target, calldata, value")
         }
 
+        let config = configStore.read()
         let calldata = SignatureUtils.fromHex(calldataHex) ?? Data()
         let value = UInt64(valueStr) ?? 0
         let chainId = config.homeChainId

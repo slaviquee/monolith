@@ -4,21 +4,18 @@ import Foundation
 struct PanicHandler {
     let policyEngine: PolicyEngine
     let auditLogger: AuditLogger
-    var configUpdater: (inout DaemonConfig) -> Void
     let userOpBuilder: UserOpBuilder?
     let seManager: SecureEnclaveManager?
     let bundlerClient: BundlerClient?
-    let config: DaemonConfig
+    let configStore: ConfigStore
 
     func handle(request: HTTPRequest) async -> HTTPResponse {
         // Freeze locally immediately
         await policyEngine.freeze()
 
-        // D5: Persist frozen=true to DaemonConfig on disk
-        var updatedConfig = config
-        configUpdater(&updatedConfig)
+        // Persist frozen=true to DaemonConfig on disk via ConfigStore
         do {
-            try updatedConfig.save()
+            try configStore.update { $0.frozen = true }
         } catch {
             // Log but don't fail — local freeze is the priority
             await auditLogger.log(
@@ -34,8 +31,9 @@ struct PanicHandler {
             reason: "Emergency freeze via /panic"
         )
 
-        // D6: Submit on-chain freeze() call via UserOp in a background task
+        // Submit on-chain freeze() call via UserOp in a background task
         // Don't block the /panic response — local freeze is the priority
+        let config = configStore.read()
         if let walletAddress = config.walletAddress,
            let userOpBuilder = userOpBuilder,
            let seManager = seManager,

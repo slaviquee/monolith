@@ -20,6 +20,7 @@ struct DaemonConfig: Codable {
     var customDailyEthCap: UInt64?
     var customMaxTxPerHour: Int?
     var customMaxSlippageBps: Int?
+    var allowlistedAddresses: [String]?
 
     static let configDir = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".clawvault")
@@ -50,6 +51,32 @@ struct DaemonConfig: Codable {
             entryPointAddress: defaultEntryPoint,
             frozen: false
         )
+    }
+}
+
+/// Thread-safe shared reference to DaemonConfig.
+/// Solves the value-type copy problem: all handlers share one ConfigStore instance.
+final class ConfigStore: @unchecked Sendable {
+    private var config: DaemonConfig
+    private let lock = NSLock()
+
+    init(_ config: DaemonConfig) {
+        self.config = config
+    }
+
+    /// Read a snapshot of the current config.
+    func read() -> DaemonConfig {
+        lock.lock()
+        defer { lock.unlock() }
+        return config
+    }
+
+    /// Mutate the config and persist to disk atomically.
+    func update(_ mutate: (inout DaemonConfig) -> Void) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        mutate(&config)
+        try config.save()
     }
 }
 

@@ -2,10 +2,11 @@ import Foundation
 
 /// GET /address — Return wallet address and public key.
 struct AddressHandler {
-    let config: DaemonConfig
+    let configStore: ConfigStore
     let seManager: SecureEnclaveManager
 
     func handle(request: HTTPRequest) async -> HTTPResponse {
+        let config = configStore.read()
         do {
             let pubKey = try await seManager.signingPublicKey()
             let x = SignatureUtils.toHex(pubKey.x)

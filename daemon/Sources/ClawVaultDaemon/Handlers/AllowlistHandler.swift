@@ -9,6 +9,7 @@ struct AllowlistHandler {
     let policyEngine: PolicyEngine
     let seManager: SecureEnclaveManager
     let auditLogger: AuditLogger
+    let configStore: ConfigStore
 
     func handle(request: HTTPRequest) async -> HTTPResponse {
         // 1. Parse the JSON body
@@ -30,8 +31,6 @@ struct AllowlistHandler {
             : "Remove \(address) from allowlist"
 
         // 2. Show native macOS confirmation dialog
-        // NOTE: NSAlert requires a real macOS GUI environment.
-        // On headless/CI builds this will be skipped. In production the dialog MUST appear.
         #if canImport(AppKit)
             let confirmed = await MainActor.run { () -> Bool in
                 let alert = NSAlert()
@@ -73,6 +72,21 @@ struct AllowlistHandler {
             await policyEngine.addToAllowlist(address)
         } else {
             await policyEngine.removeFromAllowlist(address)
+        }
+
+        // 5. Persist allowlist to config
+        let currentAllowlist = await policyEngine.currentAllowlist
+        do {
+            try configStore.update { cfg in
+                cfg.allowlistedAddresses = Array(currentAllowlist)
+            }
+        } catch {
+            await auditLogger.log(
+                action: "allowlist_update",
+                target: address,
+                decision: "warning",
+                reason: "Failed to persist allowlist: \(error.localizedDescription)"
+            )
         }
 
         await auditLogger.log(

@@ -2,17 +2,27 @@ import Foundation
 
 /// GET /capabilities — Return current limits, budgets, gas status.
 struct CapabilitiesHandler {
-    let config: DaemonConfig
+    let configStore: ConfigStore
     let policyEngine: PolicyEngine
     let chainClient: ChainClient
     let protocolRegistry: ProtocolRegistry
 
     func handle(request: HTTPRequest) async -> HTTPResponse {
+        let config = configStore.read()
+
         guard let walletAddress = config.walletAddress else {
             return .error(503, "Wallet not deployed yet")
         }
 
-        let profile = SecurityProfile.forName(config.activeProfile) ?? .balanced
+        let baseProfile = SecurityProfile.forName(config.activeProfile) ?? .balanced
+        let profile = baseProfile.withOverrides(
+            perTxStablecoinCap: config.customPerTxStablecoinCap,
+            dailyStablecoinCap: config.customDailyStablecoinCap,
+            perTxEthCap: config.customPerTxEthCap,
+            dailyEthCap: config.customDailyEthCap,
+            maxTxPerHour: config.customMaxTxPerHour,
+            maxSlippageBps: config.customMaxSlippageBps
+        )
         let budgets = await policyEngine.remainingBudgets()
         let gasStatus = await GasPreflight.gasStatus(
             walletAddress: walletAddress,
@@ -41,7 +51,7 @@ struct CapabilitiesHandler {
                 "stablecoinDaily": budgets.stablecoinRemaining,
             ],
             "allowlistedAddresses": Array(allowlist),
-            "protocols": protocols,
+            "allowedProtocols": protocols,
             "autopilotEligible": [
                 "eth_transfer_allowlisted",
                 "stablecoin_transfer_allowlisted",
