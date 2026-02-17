@@ -1,4 +1,5 @@
 // swift-tools-version: 6.0
+// Requires Xcode 16+ or Swift 6.0+ toolchain (for swift-testing framework).
 import PackageDescription
 
 let package = Package(

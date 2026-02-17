@@ -38,6 +38,17 @@ struct SetupHandler {
             }
         }
 
+        // Accept optional factoryAddress in the setup request
+        if let factory = json["factoryAddress"] as? String, !factory.isEmpty {
+            do {
+                try configStore.update { cfg in
+                    cfg.factoryAddress = factory
+                }
+            } catch {
+                return .error(500, "Failed to persist factory address: \(error.localizedDescription)")
+            }
+        }
+
         let config = configStore.read()
 
         // Validate factory address is configured
@@ -55,8 +66,12 @@ struct SetupHandler {
             return .error(503, "Secure Enclave not available: \(error.localizedDescription)")
         }
 
-        // Run precompile probe
-        let precompileAvailable = await PrecompileProbe.probe(chainClient: services.chainClient)
+        // Run precompile probe against the target chain (not the currently configured one)
+        guard let targetChainConfig = ChainConfig.forChain(chainIdValue) else {
+            return .error(400, "Unsupported chain: \(chainIdValue)")
+        }
+        let probeClient = ChainClient(rpcURL: targetChainConfig.rpcURL)
+        let precompileAvailable = await PrecompileProbe.probe(chainClient: probeClient)
 
         // Resolve profile BEFORE computing address (avoid stale config)
         let resolvedProfile = SecurityProfile.forName(profile)!  // already validated above
@@ -157,15 +172,14 @@ struct SetupHandler {
         let signerXHex = SignatureUtils.toHex(deployPubKey.x)
         let signerYHex = SignatureUtils.toHex(deployPubKey.y)
         let deployProfile = SecurityProfile.forName(config.activeProfile) ?? .balanced
-        // Normalize dailyStablecoinCap from 6-decimal to 18-decimal
-        let stableCapNormalized = UInt64(deployProfile.dailyStablecoinCap) * 1_000_000_000_000
         let initCode = buildInitCode(
             factoryAddress: config.factoryAddress,
             signerXHex: signerXHex,
             signerYHex: signerYHex,
             recoveryAddress: recoveryAddr,
             dailyCap: deployProfile.dailyEthCap,
-            dailyStablecoinCap: stableCapNormalized,
+            dailyStablecoinCap: deployProfile.dailyStablecoinCap,
+            chainId: config.homeChainId,
             usePrecompile: config.precompileAvailable ?? false
         )
 
@@ -249,21 +263,39 @@ struct SetupHandler {
         let capHex = String(profile.dailyEthCap, radix: 16)
         calldata += String(repeating: "0", count: 64 - capHex.count) + capHex
         // dailyStablecoinCap (uint256) — profile.dailyStablecoinCap normalized to 18 decimals
-        let stableCapWei = UInt64(profile.dailyStablecoinCap) * 1_000_000_000_000 // 6-dec → 18-dec
-        let stableCapHex = String(stableCapWei, radix: 16)
-        calldata += String(repeating: "0", count: 64 - stableCapHex.count) + stableCapHex
+        calldata += stableCapToUint256Hex(profile.dailyStablecoinCap)
+
+        // Filter stablecoins for the target chain (sorted for deterministic encoding)
+        let stables = StablecoinRegistry.defaultEntries
+            .filter { $0.chainId == chainId }
+            .sorted(by: { $0.address < $1.address })
+        let stableCount = stables.count
+
         // stablecoins array offset (dynamic type) = 9 * 32 = 288 = 0x120
         calldata += String(repeating: "0", count: 61) + "120"
-        // stablecoinDecs array offset = 288 + 32 (stablecoins length word) = 320 = 0x140
-        calldata += String(repeating: "0", count: 61) + "140"
+        // stablecoinDecs array offset = 0x120 + 32 (length word) + stableCount * 32
+        let decsOffset = 0x120 + 32 + stableCount * 32
+        let decsOffsetHex = String(decsOffset, radix: 16)
+        calldata += String(repeating: "0", count: 64 - decsOffsetHex.count) + decsOffsetHex
         // usePrecompile (bool)
         calldata += String(repeating: "0", count: 63) + (precompileAvailable ? "1" : "0")
         // salt (bytes32 = 0)
         calldata += String(repeating: "0", count: 64)
-        // stablecoins array: length = 0
-        calldata += String(repeating: "0", count: 64)
-        // stablecoinDecs array: length = 0
-        calldata += String(repeating: "0", count: 64)
+        // stablecoins array: length
+        let countHex = String(stableCount, radix: 16)
+        calldata += String(repeating: "0", count: 64 - countHex.count) + countHex
+        // stablecoins array: entries (address padded to 32 bytes)
+        for entry in stables {
+            let addrClean = entry.address.replacingOccurrences(of: "0x", with: "").lowercased()
+            calldata += String(repeating: "0", count: 24) + addrClean
+        }
+        // stablecoinDecs array: length
+        calldata += String(repeating: "0", count: 64 - countHex.count) + countHex
+        // stablecoinDecs array: entries (uint8 padded to 32 bytes)
+        for entry in stables {
+            let decHex = String(entry.decimals, radix: 16)
+            calldata += String(repeating: "0", count: 64 - decHex.count) + decHex
+        }
 
         let result = try await services.chainClient.ethCall(to: factoryAddress, data: calldata)
 
@@ -283,7 +315,8 @@ struct SetupHandler {
         signerYHex: String,
         recoveryAddress: String,
         dailyCap: UInt64,
-        dailyStablecoinCap: UInt64,
+        dailyStablecoinCap: UInt64, // raw 6-decimal value
+        chainId: UInt64,
         usePrecompile: Bool
     ) -> Data {
         // initCode = factoryAddress (20 bytes) + createAccount calldata
@@ -307,6 +340,12 @@ struct SetupHandler {
             initCode.append(SignatureUtils.fromHex("0x" + hex) ?? Data())
         }
 
+        // Filter stablecoins for the target chain (sorted for deterministic encoding)
+        let stables = StablecoinRegistry.defaultEntries
+            .filter { $0.chainId == chainId }
+            .sorted(by: { $0.address < $1.address })
+        let stableCount = stables.count
+
         // signerX
         appendHex(pad64(signerXClean))
         // signerY
@@ -315,22 +354,51 @@ struct SetupHandler {
         appendHex(String(repeating: "0", count: 24) + recoveryClean)
         // dailyCap
         appendHex(pad64(String(dailyCap, radix: 16)))
-        // dailyStablecoinCap (18-decimal normalized)
-        appendHex(pad64(String(dailyStablecoinCap, radix: 16)))
+        // dailyStablecoinCap (normalized to 18 decimals via wide multiply)
+        appendHex(stableCapToUint256Hex(dailyStablecoinCap))
         // stablecoins array offset = 9 * 32 = 288 = 0x120
         appendHex(pad64("120"))
-        // stablecoinDecs array offset = 288 + 32 = 320 = 0x140
-        appendHex(pad64("140"))
+        // stablecoinDecs array offset = 0x120 + 32 (length word) + stableCount * 32
+        let decsOffset = 0x120 + 32 + stableCount * 32
+        appendHex(pad64(String(decsOffset, radix: 16)))
         // usePrecompile
         appendHex(String(repeating: "0", count: 63) + (usePrecompile ? "1" : "0"))
         // salt = 0
         appendHex(String(repeating: "0", count: 64))
-        // stablecoins array: length = 0
-        appendHex(String(repeating: "0", count: 64))
-        // stablecoinDecs array: length = 0
-        appendHex(String(repeating: "0", count: 64))
+        // stablecoins array: length
+        let countHex = pad64(String(stableCount, radix: 16))
+        appendHex(countHex)
+        // stablecoins array: entries (address padded to 32 bytes)
+        for entry in stables {
+            let addrClean = entry.address.replacingOccurrences(of: "0x", with: "").lowercased()
+            appendHex(String(repeating: "0", count: 24) + addrClean)
+        }
+        // stablecoinDecs array: length
+        appendHex(countHex)
+        // stablecoinDecs array: entries (uint8 padded to 32 bytes)
+        for entry in stables {
+            appendHex(pad64(String(entry.decimals, radix: 16)))
+        }
 
         return initCode
+    }
+
+    /// Multiply a 6-decimal stablecoin cap by 10^12 to get 18-decimal,
+    /// returning a zero-padded 64-char hex string for uint256 ABI encoding.
+    /// Uses `multipliedFullWidth` to avoid UInt64 overflow.
+    private func stableCapToUint256Hex(_ cap6Dec: UInt64) -> String {
+        let scale: UInt64 = 1_000_000_000_000 // 10^12
+        let (high, low) = cap6Dec.multipliedFullWidth(by: scale)
+        if high == 0 {
+            let hex = String(low, radix: 16)
+            return String(repeating: "0", count: 64 - hex.count) + hex
+        }
+        // Combine: result = high * 2^64 + low. Encode as big-endian hex.
+        let highHex = String(high, radix: 16)
+        let lowHex = String(low, radix: 16)
+        let lowPadded = String(repeating: "0", count: 16 - lowHex.count) + lowHex
+        let combined = highHex + lowPadded
+        return String(repeating: "0", count: 64 - combined.count) + combined
     }
 
     // MARK: - Factory Selectors

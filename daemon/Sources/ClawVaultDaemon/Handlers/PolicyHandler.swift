@@ -130,18 +130,9 @@ struct PolicyHandler {
             return .error(500, "Failed to persist config: \(error.localizedDescription)")
         }
 
-        // Update the runtime PolicyEngine with the new profile + overrides
+        // Rebuild all chain-dependent services (PolicyEngine, ProtocolRegistry, etc.)
         let updatedConfig = configStore.read()
-        let baseProfile = SecurityProfile.forName(updatedConfig.activeProfile) ?? .balanced
-        let effectiveProfile = baseProfile.withOverrides(
-            perTxStablecoinCap: updatedConfig.customPerTxStablecoinCap,
-            dailyStablecoinCap: updatedConfig.customDailyStablecoinCap,
-            perTxEthCap: updatedConfig.customPerTxEthCap,
-            dailyEthCap: updatedConfig.customDailyEthCap,
-            maxTxPerHour: updatedConfig.customMaxTxPerHour,
-            maxSlippageBps: updatedConfig.customMaxSlippageBps
-        )
-        await services.policyEngine.updateProfile(effectiveProfile)
+        services.reconfigure(config: updatedConfig)
 
         await auditLogger.log(
             action: "policy_update",
