@@ -6,11 +6,7 @@ final class DaemonXPCService: NSObject, NSXPCListenerDelegate, @unchecked Sendab
     static let machServiceName = "com.clawvault.daemon"
     #if !DEBUG
     static let companionBundleID = "com.clawvault.companion"
-    static let companionTeamID: String = {
-        let teamID = TeamConfig.teamID
-        precondition(teamID != "REPLACE_ME", "Team ID not configured — see shared/TeamConfig.swift")
-        return teamID
-    }()
+    static let companionTeamID = TeamConfig.teamID
     #endif
 
     private let listener: NSXPCListener
