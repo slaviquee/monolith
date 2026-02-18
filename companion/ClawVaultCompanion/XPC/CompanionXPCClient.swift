@@ -100,17 +100,24 @@ class CompanionXPCClient: NSObject, ObservableObject, @unchecked Sendable {
 
 extension CompanionXPCClient: CompanionCallbackProtocol {
     func requestAdminApproval(summary: String, reply: @escaping (Bool) -> Void) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self else {
+        DispatchQueue.main.async {
+            let context = LAContext()
+            var authError: NSError?
+
+            guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError) else {
+                print(
+                    "[Companion] Touch ID unavailable for admin approval: \(authError?.localizedDescription ?? "unknown error")"
+                )
                 reply(false)
                 return
             }
-            // Set the active approval request — triggers SwiftUI sheet
-            self.activeApprovalRequest = AdminApprovalRequest(summary: summary) { approved in
-                reply(approved)
-                DispatchQueue.main.async {
-                    self.activeApprovalRequest = nil
+
+            let reason = "Approve ClawVault admin action: \(summary)"
+            context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { success, error in
+                if !success, let error {
+                    print("[Companion] Admin approval denied/failed: \(error.localizedDescription)")
                 }
+                reply(success)
             }
         }
     }
