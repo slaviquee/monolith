@@ -6,9 +6,13 @@ import Security
 actor SecureEnclaveManager {
     private var signingKey: SecureEnclave.P256.Signing.PrivateKey?
     private var adminKey: SecureEnclave.P256.Signing.PrivateKey?
-
-    private let signingKeyTag = "com.clawvault.signing"
-    private let adminKeyTag = "com.clawvault.admin"
+    private let keychainService = "com.clawvault.secureenclave.keys"
+    private let signingAccount = "signing"
+    private let adminAccount = "admin"
+    private let legacySigningTag = "com.clawvault.signing"
+    private let legacyAdminTag = "com.clawvault.admin"
+    private let legacySigningKeyPath = DaemonConfig.configDir.appendingPathComponent("se-signing.key")
+    private let legacyAdminKeyPath = DaemonConfig.configDir.appendingPathComponent("se-admin.key")
 
     enum KeyError: Error {
         case secureEnclaveNotAvailable
@@ -72,12 +76,26 @@ actor SecureEnclaveManager {
     // MARK: - Private
 
     private func loadOrCreateSigningKey() throws -> SecureEnclave.P256.Signing.PrivateKey {
-        // Try to load existing key
-        if let existing = try? loadKey(tag: signingKeyTag, requiresAuth: false) {
+        // Preferred source: generic-password keychain item containing SE key reference bytes.
+        if let existing = try? loadKeyFromKeychain(account: signingAccount) {
             return existing
         }
 
-        // Create new signing key — no .userPresence (signs silently for routine ops)
+        // Migration path for previous dev/prototype storage formats.
+        if let migrated = try? migrateLegacyTaggedKey(tag: legacySigningTag, account: signingAccount) {
+            return migrated
+        }
+        if let migrated = try? migrateLegacyFileKey(path: legacySigningKeyPath, account: signingAccount) {
+            return migrated
+        }
+
+        // Fail closed if this looks like an existing install. Regenerating the signing key would
+        // break wallet identity and config signature integrity.
+        if hasExistingInstallState() {
+            throw KeyError.keyNotFound
+        }
+
+        // First run: create signing key without user presence.
         guard let accessControl = SecAccessControlCreateWithFlags(
             nil,
             kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
@@ -91,7 +109,7 @@ actor SecureEnclaveManager {
             let key = try SecureEnclave.P256.Signing.PrivateKey(
                 accessControl: accessControl
             )
-            try storeKey(key, tag: signingKeyTag)
+            try storeKeyInKeychain(key, account: signingAccount)
             return key
         } catch {
             throw KeyError.keyGenerationFailed(error.localizedDescription)
@@ -99,12 +117,18 @@ actor SecureEnclaveManager {
     }
 
     private func loadOrCreateAdminKey() throws -> SecureEnclave.P256.Signing.PrivateKey {
-        // Try to load existing key
-        if let existing = try? loadKey(tag: adminKeyTag, requiresAuth: true) {
+        if let existing = try? loadKeyFromKeychain(account: adminAccount) {
             return existing
         }
 
-        // Create admin key — requires Touch ID for each use
+        if let migrated = try? migrateLegacyTaggedKey(tag: legacyAdminTag, account: adminAccount) {
+            return migrated
+        }
+        if let migrated = try? migrateLegacyFileKey(path: legacyAdminKeyPath, account: adminAccount) {
+            return migrated
+        }
+
+        // Admin key is local-policy only, safe to create if missing.
         guard let accessControl = SecAccessControlCreateWithFlags(
             nil,
             kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
@@ -118,19 +142,26 @@ actor SecureEnclaveManager {
             let key = try SecureEnclave.P256.Signing.PrivateKey(
                 accessControl: accessControl
             )
-            try storeKey(key, tag: adminKeyTag)
+            try storeKeyInKeychain(key, account: adminAccount)
             return key
         } catch {
             throw KeyError.keyGenerationFailed(error.localizedDescription)
         }
     }
 
-    private func loadKey(tag: String, requiresAuth: Bool) throws -> SecureEnclave.P256.Signing.PrivateKey {
+    private func hasExistingInstallState() -> Bool {
+        let fm = FileManager.default
+        return fm.fileExists(atPath: DaemonConfig.configPath.path)
+            || fm.fileExists(atPath: DaemonConfig.configSigPath.path)
+    }
+
+    private func loadKeyFromKeychain(account: String) throws -> SecureEnclave.P256.Signing.PrivateKey {
         let query: [String: Any] = [
-            kSecClass as String: kSecClassKey,
-            kSecAttrApplicationTag as String: tag.data(using: .utf8)!,
-            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-            kSecReturnRef as String: true,
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
         ]
 
         var item: CFTypeRef?
@@ -139,25 +170,85 @@ actor SecureEnclaveManager {
             throw KeyError.keyNotFound
         }
 
-        let secKey = item as! SecKey
-        let keyData = try SecureEnclave.P256.Signing.PrivateKey.init(dataRepresentation: secKeyToData(secKey))
-        return keyData
+        guard let data = item as? Data else {
+            throw KeyError.keyNotFound
+        }
+
+        do {
+            return try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: data)
+        } catch {
+            throw KeyError.keyNotFound
+        }
     }
 
-    private func storeKey(_ key: SecureEnclave.P256.Signing.PrivateKey, tag: String) throws {
-        // Store the key's data representation in the keychain
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassKey,
-            kSecAttrApplicationTag as String: tag.data(using: .utf8)!,
-            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-            kSecValueData as String: key.dataRepresentation,
+    private func storeKeyInKeychain(_ key: SecureEnclave.P256.Signing.PrivateKey, account: String) throws {
+        let data = key.dataRepresentation
+
+        let addQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: account,
             kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            kSecValueData as String: data,
         ]
 
-        let status = SecItemAdd(query as CFDictionary, nil)
-        guard status == errSecSuccess || status == errSecDuplicateItem else {
-            throw KeyError.keyGenerationFailed("Keychain store failed: \(status)")
+        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+        if addStatus == errSecSuccess {
+            return
         }
+        if addStatus != errSecDuplicateItem {
+            throw KeyError.keyGenerationFailed("Keychain add failed: \(addStatus)")
+        }
+
+        let updateQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: account,
+        ]
+        let updates: [String: Any] = [
+            kSecValueData as String: data
+        ]
+        let updateStatus = SecItemUpdate(updateQuery as CFDictionary, updates as CFDictionary)
+        guard updateStatus == errSecSuccess else {
+            throw KeyError.keyGenerationFailed("Keychain update failed: \(updateStatus)")
+        }
+    }
+
+    private func migrateLegacyFileKey(path: URL, account: String) throws -> SecureEnclave.P256.Signing.PrivateKey {
+        guard FileManager.default.fileExists(atPath: path.path) else {
+            throw KeyError.keyNotFound
+        }
+
+        let data = try Data(contentsOf: path)
+        let key = try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: data)
+        try storeKeyInKeychain(key, account: account)
+        try? FileManager.default.removeItem(at: path)
+        return key
+    }
+
+    private func migrateLegacyTaggedKey(tag: String, account: String) throws -> SecureEnclave.P256.Signing.PrivateKey {
+        guard let tagData = tag.data(using: .utf8) else {
+            throw KeyError.keyNotFound
+        }
+
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassKey,
+            kSecAttrApplicationTag as String: tagData,
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        guard status == errSecSuccess, let data = item as? Data else {
+            throw KeyError.keyNotFound
+        }
+
+        let key = try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: data)
+        try storeKeyInKeychain(key, account: account)
+        SecItemDelete(query as CFDictionary)
+        return key
     }
 
     private func extractCoordinates(
@@ -168,13 +259,5 @@ actor SecureEnclaveManager {
         let x = raw.prefix(32)
         let y = raw.suffix(32)
         return (x: Data(x), y: Data(y))
-    }
-
-    private func secKeyToData(_ secKey: SecKey) throws -> Data {
-        var error: Unmanaged<CFError>?
-        guard let data = SecKeyCopyExternalRepresentation(secKey, &error) as Data? else {
-            throw KeyError.keyNotFound
-        }
-        return data
     }
 }
