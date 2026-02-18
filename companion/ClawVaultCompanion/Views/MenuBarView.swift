@@ -32,9 +32,9 @@ struct MenuBarView: View {
                             .font(.caption)
                             .lineLimit(2)
                         HStack {
-                            Text("Code: \(approval.code)")
-                                .font(.system(.caption, design: .monospaced))
-                                .foregroundStyle(.primary)
+                            Text("Approval code shown in notification")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
                             Spacer()
                             Text(approval.timeRemaining)
                                 .font(.caption2)
