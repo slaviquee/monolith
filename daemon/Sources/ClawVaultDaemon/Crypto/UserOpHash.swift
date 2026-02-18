@@ -1,30 +1,15 @@
 import CryptoKit
 import Foundation
 
-/// Computes ERC-4337 v0.7 userOpHash using EIP-712 typed data hashing.
-/// Matches EntryPoint.getUserOpHash(): toTypedDataHash(domainSeparator, structHash).
+/// Computes ERC-4337 v0.7 userOpHash matching the deployed EntryPoint.getUserOpHash().
+/// The deployed EntryPoint v0.7 at 0x0000000071727De22E5E9d8BAf0edAc6f37da032 uses:
+///   innerHash = keccak256(abi.encode(sender, nonce, keccak256(initCode), keccak256(callData),
+///               accountGasLimits, preVerificationGas, gasFees, keccak256(paymasterAndData)))
+///   userOpHash = keccak256(abi.encode(innerHash, entryPoint, chainId))
+/// Note: NO EIP-712 prefix, NO typehash, NO domain separator.
 enum UserOpHash {
-    // MARK: - EIP-712 Constants
-
-    /// keccak256("PackedUserOperation(address sender,uint256 nonce,bytes initCode,bytes callData,bytes32 accountGasLimits,uint256 preVerificationGas,bytes32 gasFees,bytes paymasterAndData)")
-    static let packedUserOpTypehash: Data = keccak256(
-        "PackedUserOperation(address sender,uint256 nonce,bytes initCode,bytes callData,bytes32 accountGasLimits,uint256 preVerificationGas,bytes32 gasFees,bytes paymasterAndData)".data(using: .utf8)!
-    )
-
-    /// keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")
-    static let eip712DomainTypehash: Data = keccak256(
-        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)".data(using: .utf8)!
-    )
-
-    /// keccak256("ERC4337")
-    static let nameHash: Data = keccak256("ERC4337".data(using: .utf8)!)
-
-    /// keccak256("1")
-    static let versionHash: Data = keccak256("1".data(using: .utf8)!)
-
     /// Compute the standard userOpHash for a PackedUserOperation.
     /// This is what the EntryPoint passes to validateUserOp and what must be signed.
-    /// Uses EIP-712: keccak256(0x19 || 0x01 || domainSeparator || structHash)
     static func compute(
         sender: String,
         nonce: Data,
@@ -37,10 +22,9 @@ enum UserOpHash {
         entryPoint: String,
         chainId: UInt64
     ) -> Data {
-        // 1. structHash = keccak256(abi.encode(TYPEHASH, sender, nonce, hash(initCode), hash(callData),
-        //    accountGasLimits, preVerGas, gasFees, hash(paymasterAndData)))
-        let structHash = keccak256(abiEncode(
-            packedUserOpTypehash,
+        // 1. innerHash = keccak256(abi.encode(sender, nonce, keccak256(initCode), keccak256(callData),
+        //    accountGasLimits, preVerificationGas, gasFees, keccak256(paymasterAndData)))
+        let innerHash = keccak256(abiEncode(
             padAddress(sender),
             padUint256(nonce),
             keccak256(initCode),
@@ -51,20 +35,12 @@ enum UserOpHash {
             keccak256(paymasterAndData)
         ))
 
-        // 2. domainSeparator = keccak256(abi.encode(EIP712Domain_TYPEHASH, nameHash, versionHash, chainId, entryPoint))
-        let domainSeparator = keccak256(abiEncode(
-            eip712DomainTypehash,
-            nameHash,
-            versionHash,
-            padUint256(chainId),
-            padAddress(entryPoint)
+        // 2. userOpHash = keccak256(abi.encode(innerHash, entryPoint, chainId))
+        return keccak256(abiEncode(
+            innerHash,
+            padAddress(entryPoint),
+            padUint256(chainId)
         ))
-
-        // 3. final = keccak256(0x19 || 0x01 || domainSeparator || structHash)
-        var message = Data([0x19, 0x01])
-        message.append(domainSeparator)
-        message.append(structHash)
-        return keccak256(message)
     }
 
     // MARK: - Keccak256

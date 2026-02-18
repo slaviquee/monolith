@@ -35,6 +35,13 @@ actor ChainClient {
         return hexStr
     }
 
+    /// Get current gas price in wei.
+    func getGasPrice() async throws -> UInt64 {
+        let result = try await rpcCall(method: "eth_gasPrice", params: [Any]())
+        guard let hexStr = result as? String else { throw ChainError.unexpectedResponse }
+        return parseHexUInt64(hexStr)
+    }
+
     /// Get current chain ID.
     func chainId() async throws -> UInt64 {
         let result = try await rpcCall(method: "eth_chainId", params: [Any]())
@@ -76,11 +83,13 @@ actor ChainClient {
         let tokenOutClean = tokenOut.hasPrefix("0x") ? String(tokenOut.dropFirst(2)) : tokenOut
         calldata += String(repeating: "0", count: 24) + tokenOutClean.lowercased()
 
-        // amountIn (uint256)
-        calldata += String(repeating: "0", count: 48) + String(amountIn, radix: 16)
+        // amountIn (uint256) — pad hex to exactly 64 chars
+        let amountInHex = String(amountIn, radix: 16)
+        calldata += String(repeating: "0", count: 64 - amountInHex.count) + amountInHex
 
-        // fee (uint24 padded to 32 bytes)
-        calldata += String(repeating: "0", count: 56) + String(fee, radix: 16)
+        // fee (uint24 padded to 32 bytes) — pad hex to exactly 64 chars
+        let feeHex = String(fee, radix: 16)
+        calldata += String(repeating: "0", count: 64 - feeHex.count) + feeHex
 
         // sqrtPriceLimitX96 = 0 (no limit)
         calldata += String(repeating: "0", count: 64)

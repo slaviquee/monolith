@@ -199,9 +199,11 @@ struct SetupHandler {
             let rawSignature = try await seManager.sign(hash)
             userOp.signature = SignatureUtils.normalizeSignature(rawSignature)
 
+            let opDict = userOp.toDict()
+
             // Submit to bundler
             let txHash = try await services.bundlerClient.sendUserOperation(
-                userOp: userOp.toDict(),
+                userOp: opDict,
                 entryPoint: config.entryPointAddress
             )
 
@@ -219,13 +221,14 @@ struct SetupHandler {
                 "chainId": config.homeChainId,
             ] as [String: Any])
         } catch {
+            let errorDetail = "\(error)"
             await auditLogger.log(
                 action: "deploy",
                 target: walletAddress,
                 decision: "error",
-                reason: error.localizedDescription
+                reason: errorDetail
             )
-            return .error(500, "Deployment failed: \(error.localizedDescription)")
+            return .error(500, "Deployment failed: \(errorDetail)")
         }
     }
 

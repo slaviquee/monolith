@@ -89,43 +89,26 @@ final class UserOpHashTests: XCTestCase {
         XCTAssertNotEqual(h1, h2)
     }
 
-    // MARK: - EIP-712 Structure Verification
+    // MARK: - Hash Structure Verification (non-EIP-712, matches deployed EntryPoint v0.7)
 
-    func testPackedUserOpTypehashIsCorrect() {
-        let typeString = "PackedUserOperation(address sender,uint256 nonce,bytes initCode,bytes callData,bytes32 accountGasLimits,uint256 preVerificationGas,bytes32 gasFees,bytes paymasterAndData)"
-        let expected = Keccak256.hash(typeString.data(using: .utf8)!)
-        XCTAssertEqual(UserOpHash.packedUserOpTypehash, expected)
-    }
+    func testHashMatchesManualComputation() {
+        let sender = "0x1234567890abcdef1234567890abcdef12345678"
+        let entryPoint = "0x0000000071727De22E5E9d8BAf0edAc6f37da032"
+        let chainId: UInt64 = 1
 
-    func testEip712DomainTypehashIsCorrect() {
-        let typeString = "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
-        let expected = Keccak256.hash(typeString.data(using: .utf8)!)
-        XCTAssertEqual(UserOpHash.eip712DomainTypehash, expected)
-    }
-
-    func testNameHashIsCorrect() {
-        let expected = Keccak256.hash("ERC4337".data(using: .utf8)!)
-        XCTAssertEqual(UserOpHash.nameHash, expected)
-    }
-
-    func testVersionHashIsCorrect() {
-        let expected = Keccak256.hash("1".data(using: .utf8)!)
-        XCTAssertEqual(UserOpHash.versionHash, expected)
-    }
-
-    func testEip712PrefixPresent() {
         let hash = UserOpHash.compute(
-            sender: "0x1234567890abcdef1234567890abcdef12345678",
+            sender: sender,
             nonce: Data(count: 32), initCode: Data(),
             callData: Data([0xb6, 0x1d, 0x27, 0xf6]),
             accountGasLimits: Data(count: 32), preVerificationGas: Data(count: 32),
             gasFees: Data(count: 32), paymasterAndData: Data(),
-            entryPoint: "0x0000000071727De22E5E9d8BAf0edAc6f37da032", chainId: 1
+            entryPoint: entryPoint, chainId: chainId
         )
 
-        let structHash = Keccak256.hash(
-            UserOpHash.packedUserOpTypehash
-            + UserOpHash.padAddress("0x1234567890abcdef1234567890abcdef12345678")
+        // Manual: innerHash = keccak256(abi.encode(sender, nonce, keccak256(initCode), keccak256(callData),
+        //   accountGasLimits, preVerificationGas, gasFees, keccak256(paymasterAndData)))
+        let innerHash = Keccak256.hash(
+            UserOpHash.padAddress(sender)
             + UserOpHash.padUint256(Data(count: 32))
             + Keccak256.hash(Data())
             + Keccak256.hash(Data([0xb6, 0x1d, 0x27, 0xf6]))
@@ -134,20 +117,12 @@ final class UserOpHashTests: XCTestCase {
             + UserOpHash.padBytes32(Data(count: 32))
             + Keccak256.hash(Data())
         )
-        let domainSep = Keccak256.hash(
-            UserOpHash.eip712DomainTypehash
-            + UserOpHash.nameHash
-            + UserOpHash.versionHash
-            + UserOpHash.padUint256(UInt64(1))
-            + UserOpHash.padAddress("0x0000000071727De22E5E9d8BAf0edAc6f37da032")
+        // userOpHash = keccak256(abi.encode(innerHash, entryPoint, chainId))
+        let expectedHash = Keccak256.hash(
+            innerHash
+            + UserOpHash.padAddress(entryPoint)
+            + UserOpHash.padUint256(chainId)
         )
-        let withoutPrefix = Keccak256.hash(domainSep + structHash)
-        XCTAssertNotEqual(hash, withoutPrefix)
-
-        var message = Data([0x19, 0x01])
-        message.append(domainSep)
-        message.append(structHash)
-        let expectedHash = Keccak256.hash(message)
         XCTAssertEqual(hash, expectedHash)
     }
 }

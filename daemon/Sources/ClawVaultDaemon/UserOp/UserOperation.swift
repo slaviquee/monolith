@@ -12,19 +12,41 @@ struct UserOperation {
     var paymasterAndData: Data    // always empty for ClawVault
     var signature: Data           // P-256 raw r||s (64 bytes)
 
-    /// Convert to JSON-RPC compatible dictionary.
+    /// Convert to bundler JSON-RPC format (ERC-4337 v0.7 unpacked).
     func toDict() -> [String: Any] {
-        [
+        let (verificationGasLimit, callGasLimit) = Self.unpackGasLimits(accountGasLimits)
+        let (maxPriorityFeePerGas, maxFeePerGas) = Self.unpackGasFees(gasFees)
+        let preVerGas = Self.unpackUint256AsUInt64(preVerificationGas)
+
+        var dict: [String: Any] = [
             "sender": sender,
             "nonce": SignatureUtils.toHex(nonce),
-            "initCode": SignatureUtils.toHex(initCode),
             "callData": SignatureUtils.toHex(callData),
-            "accountGasLimits": SignatureUtils.toHex(accountGasLimits),
-            "preVerificationGas": SignatureUtils.toHex(preVerificationGas),
-            "gasFees": SignatureUtils.toHex(gasFees),
-            "paymasterAndData": SignatureUtils.toHex(paymasterAndData),
+            "verificationGasLimit": "0x" + String(verificationGasLimit, radix: 16),
+            "callGasLimit": "0x" + String(callGasLimit, radix: 16),
+            "preVerificationGas": "0x" + String(preVerGas, radix: 16),
+            "maxFeePerGas": "0x" + String(maxFeePerGas, radix: 16),
+            "maxPriorityFeePerGas": "0x" + String(maxPriorityFeePerGas, radix: 16),
             "signature": SignatureUtils.toHex(signature),
         ]
+
+        // v0.7: split initCode into factory + factoryData
+        if !initCode.isEmpty {
+            let factoryAddr = "0x" + initCode.prefix(20).map { String(format: "%02x", $0) }.joined()
+            let factoryData = "0x" + initCode.dropFirst(20).map { String(format: "%02x", $0) }.joined()
+            dict["factory"] = factoryAddr
+            dict["factoryData"] = factoryData
+        }
+
+        // v0.7: split paymasterAndData (empty for ClawVault, but handle for completeness)
+        if !paymasterAndData.isEmpty {
+            let paymasterAddr = "0x" + paymasterAndData.prefix(20).map { String(format: "%02x", $0) }.joined()
+            let pmData = "0x" + paymasterAndData.dropFirst(20).map { String(format: "%02x", $0) }.joined()
+            dict["paymaster"] = paymasterAddr
+            dict["paymasterData"] = pmData
+        }
+
+        return dict
     }
 
     /// Pack verificationGasLimit and callGasLimit into bytes32.

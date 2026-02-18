@@ -269,9 +269,9 @@ struct SignHandler {
                 target: target,
                 value: valueStr,
                 decision: "error",
-                reason: error.localizedDescription
+                reason: "\(error)"
             )
-            return .error(500, "Transaction failed: \(error.localizedDescription)")
+            return .error(500, "Transaction failed: \(error)")
         }
     }
 }

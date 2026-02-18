@@ -29,7 +29,13 @@ actor UserOpBuilder {
         // 2. Encode the wallet's execute() call
         let walletCallData = encodeExecuteCall(target: target, value: value, data: calldata)
 
-        // 3. Build preliminary UserOp for gas estimation
+        // 3. Fetch current gas prices from the chain
+        let gasPrice = try await chainClient.getGasPrice()
+        // Use 2x base fee as maxFeePerGas with a reasonable floor
+        let maxFeePerGas = max(gasPrice * 2, 100_000_000) // at least 0.1 gwei
+        let maxPriorityFeePerGas = max(gasPrice / 10, 10_000_000) // ~10% of base, floor 0.01 gwei
+
+        // 4. Build preliminary UserOp for gas estimation
         var userOp = UserOperation(
             sender: sender,
             nonce: nonce,
@@ -39,21 +45,22 @@ actor UserOpBuilder {
                 verificationGasLimit: 200_000, callGasLimit: 200_000),
             preVerificationGas: uint256(50_000),
             gasFees: UserOperation.packGasFees(
-                maxPriorityFeePerGas: 1_500_000_000,  // 1.5 gwei
-                maxFeePerGas: 30_000_000_000           // 30 gwei
+                maxPriorityFeePerGas: maxPriorityFeePerGas,
+                maxFeePerGas: maxFeePerGas
             ),
             paymasterAndData: Data(),  // Always empty — no paymasters
             signature: Data(count: 64)  // Dummy signature for estimation
         )
 
-        // 4. Estimate gas via bundler
+        // 5. Estimate gas via bundler
         let gasEstimate = try await bundlerClient.estimateUserOperationGas(
             userOp: userOp.toDict(),
             entryPoint: entryPoint
         )
 
-        // 5. Add safety margins to gas limits
-        let verificationGas = max(gasEstimate.verificationGasLimit, 100_000) * 12 / 10
+        // 6. Add safety margins to gas limits
+        // P-256 verification via Daimo verifier is gas-heavy; use 50% margin for verification
+        let verificationGas = max(gasEstimate.verificationGasLimit, 300_000) * 15 / 10
         let callGas = max(gasEstimate.callGasLimit, 50_000) * 12 / 10
         let preVerGas = max(gasEstimate.preVerificationGas, 21_000) * 12 / 10
 

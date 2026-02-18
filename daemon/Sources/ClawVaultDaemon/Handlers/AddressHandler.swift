@@ -7,21 +7,22 @@ struct AddressHandler {
 
     func handle(request: HTTPRequest) async -> HTTPResponse {
         let config = configStore.read()
+
+        var signerPublicKey: [String: String]
         do {
             let pubKey = try await seManager.signingPublicKey()
-            let x = SignatureUtils.toHex(pubKey.x)
-            let y = SignatureUtils.toHex(pubKey.y)
-
-            return .json(200, [
-                "walletAddress": config.walletAddress ?? "not deployed",
-                "signerPublicKey": [
-                    "x": x,
-                    "y": y,
-                ],
-                "homeChainId": config.homeChainId,
-            ] as [String: Any])
+            signerPublicKey = [
+                "x": SignatureUtils.toHex(pubKey.x),
+                "y": SignatureUtils.toHex(pubKey.y),
+            ]
         } catch {
-            return .error(500, "Failed to read public key: \(error.localizedDescription)")
+            signerPublicKey = ["x": "unavailable", "y": "unavailable"]
         }
+
+        return .json(200, [
+            "walletAddress": config.walletAddress ?? "not deployed",
+            "signerPublicKey": signerPublicKey,
+            "homeChainId": config.homeChainId,
+        ] as [String: Any])
     }
 }

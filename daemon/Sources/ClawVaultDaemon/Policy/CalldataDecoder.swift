@@ -242,7 +242,8 @@ struct CalldataDecoder {
             let offsetPos = inputsOffset + 32 + i * 32
             guard offsetPos + 32 <= params.count else { return nil }
             let inputRelOffset = readUInt256AsInt(params, offset: offsetPos)
-            let inputAbsOffset = inputsOffset + inputRelOffset
+            // Offsets within bytes[] are relative to the position after the length word
+            let inputAbsOffset = inputsOffset + 32 + inputRelOffset
 
             // Read input length and data
             guard inputAbsOffset + 32 <= params.count else { return nil }

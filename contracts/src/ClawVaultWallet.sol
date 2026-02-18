@@ -188,7 +188,8 @@ contract ClawVaultWallet is IAccount {
         if (signature.length != 64) return bytes4(0xffffffff);
 
         (uint256 r, uint256 s) = abi.decode(signature, (uint256, uint256));
-        bool valid = P256SignatureVerifier.verify(hash, r, s, signerX, signerY, usePrecompile);
+        bytes32 digest = sha256(abi.encodePacked(hash));
+        bool valid = P256SignatureVerifier.verify(digest, r, s, signerX, signerY, usePrecompile);
 
         return valid ? bytes4(0x1626ba7e) : bytes4(0xffffffff);
     }
@@ -276,7 +277,10 @@ contract ClawVaultWallet is IAccount {
         if (signature.length != 64) revert InvalidSignatureLength();
 
         (uint256 r, uint256 s) = abi.decode(signature, (uint256, uint256));
-        bool valid = P256SignatureVerifier.verify(userOpHash, r, s, signerX, signerY, usePrecompile);
+        // SHA-256 pre-hash: CryptoKit (Secure Enclave) always SHA-256 hashes before P-256 signing,
+        // so the on-chain verifier must hash the userOpHash to match the signed digest.
+        bytes32 digest = sha256(abi.encodePacked(userOpHash));
+        bool valid = P256SignatureVerifier.verify(digest, r, s, signerX, signerY, usePrecompile);
 
         return valid ? SIG_VALIDATION_SUCCESS : SIG_VALIDATION_FAILED;
     }
