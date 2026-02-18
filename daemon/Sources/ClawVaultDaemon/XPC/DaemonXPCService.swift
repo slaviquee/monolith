@@ -6,8 +6,11 @@ final class DaemonXPCService: NSObject, NSXPCListenerDelegate, @unchecked Sendab
     static let machServiceName = "com.clawvault.daemon"
     #if !DEBUG
     static let companionBundleID = "com.clawvault.companion"
-    // TODO: Replace with actual Developer ID team identifier before release
-    static let companionTeamID = "XXXXXXXXXX"
+    static let companionTeamID: String = {
+        let teamID = TeamConfig.teamID
+        precondition(teamID != "REPLACE_ME", "Team ID not configured — see shared/TeamConfig.swift")
+        return teamID
+    }()
     #endif
 
     private let listener: NSXPCListener
@@ -66,11 +69,10 @@ final class DaemonXPCService: NSObject, NSXPCListenerDelegate, @unchecked Sendab
 
         connection.resume()
 
-        // Store the remote proxy for callback use
-        if let proxy = connection.remoteObjectProxy as? CompanionCallbackProtocol {
-            companionProxy.setProxy(proxy)
-            print("[XPC] Companion connected (pid: \(connection.processIdentifier))")
-        }
+        // Store the connection for callback use (CompanionProxy obtains proxy per-call
+        // via remoteObjectProxyWithErrorHandler for proper error handling)
+        companionProxy.setConnection(connection)
+        print("[XPC] Companion connected (pid: \(connection.processIdentifier))")
 
         return true
     }
