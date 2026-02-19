@@ -1,8 +1,8 @@
 {
   "name": "monolith-skill",
-  "version": "0.1.0",
+  "version": "0.1.3",
   "type": "module",
-  "description": "Monolith crypto wallet skill for OpenClaw agents",
+  "description": "Secure crypto wallet for AI agents. Hardware-isolated keys (Apple Secure Enclave), ERC-4337 smart wallet, on-chain spending caps, default-deny policy engine.",
   "scripts": {
     "send": "node scripts/send.js",
     "swap": "node scripts/swap.js",

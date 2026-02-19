@@ -1,5 +1,4 @@
 import fs from 'node:fs';
-import { execFileSync } from 'node:child_process';
 
 const DAEMON_LABEL = 'com.monolith.daemon';
 const DAEMON_BINARY =
@@ -17,53 +16,51 @@ const COMPANION_PATHS = [
   `${process.env.HOME}/Applications/MonolithCompanion.app`,
 ].filter(Boolean);
 
-function runCommand(command, args) {
-  try {
-    const stdout = execFileSync(command, args, {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    return { ok: true, stdout: (stdout || '').trim(), stderr: '' };
-  } catch (err) {
-    const stderr = err?.stderr ? String(err.stderr).trim() : String(err.message || '');
-    const stdout = err?.stdout ? String(err.stdout).trim() : '';
-    return { ok: false, stdout, stderr };
-  }
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
-function isAlreadyLoadedError(stderr) {
-  const lower = String(stderr || '').toLowerCase();
-  return lower.includes('service already loaded') || lower.includes('in progress');
+function buildManualCommands({ launchAgentPath, companionPath }) {
+  const commands = [];
+  if (typeof process.getuid === 'function' && launchAgentPath) {
+    const domain = `gui/${process.getuid()}`;
+    const service = `${domain}/${DAEMON_LABEL}`;
+    commands.push(`/bin/launchctl bootstrap ${domain} ${shellQuote(launchAgentPath)}`);
+    commands.push(`/bin/launchctl enable ${service}`);
+    commands.push(`/bin/launchctl kickstart -k ${service}`);
+  }
+
+  if (companionPath) {
+    commands.push(`/usr/bin/open -g ${shellQuote(companionPath)}`);
+  }
+
+  return commands;
 }
 
 /**
- * Best-effort local runtime bootstrap for setup flow.
- * Attempts to start daemon LaunchAgent and open the companion app.
+ * Best-effort local runtime diagnostics for setup flow.
+ * No local commands are executed automatically.
  */
 export function attemptRuntimeBootstrap() {
   const result = {
-    attempted: true,
+    attempted: false,
     daemonStartAttempted: false,
     daemonStartSucceeded: false,
     companionLaunchAttempted: false,
     companionLaunchSucceeded: false,
+    manualCommands: [],
     messages: [],
   };
 
   if (process.platform !== 'darwin') {
-    result.messages.push('Automatic startup is only supported on macOS.');
+    result.messages.push('Setup helper is only available on macOS.');
     return result;
   }
 
   if (!fs.existsSync(DAEMON_BINARY)) {
     result.messages.push(
-      `Daemon binary not found at ${DAEMON_BINARY}. Install MonolithDaemon.pkg and retry setup.`
+      `Daemon binary not found at ${DAEMON_BINARY}. Install MonolithDaemon.pkg first.`
     );
-    return result;
-  }
-
-  if (typeof process.getuid !== 'function') {
-    result.messages.push('Cannot determine local user id for launchctl startup.');
     return result;
   }
 
@@ -72,51 +69,25 @@ export function attemptRuntimeBootstrap() {
     result.messages.push(
       `LaunchAgent plist not found. Expected one of: ${LAUNCH_AGENT_PATHS.join(', ')}.`
     );
-    return result;
   }
 
-  const domain = `gui/${process.getuid()}`;
-  const service = `${domain}/${DAEMON_LABEL}`;
-  result.daemonStartAttempted = true;
-
-  const printResult = runCommand('/bin/launchctl', ['print', service]);
-  if (!printResult.ok) {
-    const bootstrapResult = runCommand('/bin/launchctl', [
-      'bootstrap',
-      domain,
-      launchAgentPath,
-    ]);
-    if (!bootstrapResult.ok && !isAlreadyLoadedError(bootstrapResult.stderr)) {
-      result.messages.push(
-        `Failed to bootstrap daemon LaunchAgent from ${launchAgentPath}: ${bootstrapResult.stderr}`
-      );
-    }
-  }
-
-  const enableResult = runCommand('/bin/launchctl', ['enable', service]);
-  if (!enableResult.ok && !isAlreadyLoadedError(enableResult.stderr)) {
-    result.messages.push(`Failed to enable daemon LaunchAgent: ${enableResult.stderr}`);
-  }
-
-  const kickstartResult = runCommand('/bin/launchctl', ['kickstart', '-k', service]);
-  if (kickstartResult.ok) {
-    result.daemonStartSucceeded = true;
-  } else {
-    result.messages.push(`Failed to start daemon service: ${kickstartResult.stderr}`);
+  if (typeof process.getuid !== 'function') {
+    result.messages.push('Cannot determine local user id for launchctl commands.');
   }
 
   const companionPath = COMPANION_PATHS.find((path) => fs.existsSync(path));
   if (companionPath) {
-    result.companionLaunchAttempted = true;
-    const openResult = runCommand('/usr/bin/open', ['-g', companionPath]);
-    if (openResult.ok) {
-      result.companionLaunchSucceeded = true;
-    } else {
-      result.messages.push(`Failed to launch companion app (${companionPath}): ${openResult.stderr}`);
-    }
+    result.manualCommands = buildManualCommands({ launchAgentPath, companionPath });
   } else {
     result.messages.push(
       `Companion app not found. Expected one of: ${COMPANION_PATHS.join(', ')}.`
+    );
+    result.manualCommands = buildManualCommands({ launchAgentPath, companionPath: null });
+  }
+
+  if (result.manualCommands.length > 0) {
+    result.messages.push(
+      'For least privilege, setup does not execute launchctl/open commands automatically. Run the manual commands if you want to start local components now.'
     );
   }
 

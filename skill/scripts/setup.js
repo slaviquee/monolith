@@ -8,15 +8,16 @@ async function main() {
   try {
     const status = await runSetupWizard();
 
-    if (status.bootstrap?.attempted) {
-      if (status.daemon?.running) {
-        console.log('Bootstrap: daemon auto-start attempted.');
-      } else {
-        console.log('Bootstrap: auto-start attempted but daemon remains unreachable.');
-      }
-
+    if (status.bootstrap) {
+      console.log('Setup helper: no local services were started automatically.');
       for (const message of status.bootstrap.messages || []) {
         console.log(`  ${message}`);
+      }
+      if (status.bootstrap.manualCommands?.length) {
+        console.log('Manual start commands:');
+        for (const command of status.bootstrap.manualCommands) {
+          console.log(`  ${command}`);
+        }
       }
     }
 

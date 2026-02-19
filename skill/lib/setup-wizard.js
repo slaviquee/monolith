@@ -38,11 +38,18 @@ async function waitForHealthyDaemon(maxAttempts = 10, delayMs = 400) {
 }
 
 function buildBootstrapFailureMessage(bootstrap) {
-  const base = 'The Monolith daemon is not running and auto-start failed.';
-  if (!bootstrap?.messages?.length) {
-    return `${base} Install MonolithDaemon.pkg, then run setup again.`;
+  const parts = ['The Monolith daemon is not running.'];
+  if (bootstrap?.messages?.length) {
+    parts.push(bootstrap.messages.join(' '));
+  } else {
+    parts.push('Install MonolithDaemon.pkg, then run setup again.');
   }
-  return `${base} ${bootstrap.messages.join(' ')}`;
+
+  if (bootstrap?.manualCommands?.length) {
+    parts.push(`Manual start commands: ${bootstrap.manualCommands.join(' ; ')}`);
+  }
+
+  return parts.join(' ');
 }
 
 /**

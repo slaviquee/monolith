@@ -1,7 +1,9 @@
 ---
 name: monolith
-description: Production-ready OpenClaw crypto wallet with Secure Enclave signing, policy-based autopilot, and human approvals for risky actions.
-metadata: {"openclaw":{"displayName":"Monolith","source":"https://github.com/slaviquee/monolith/tree/main/skill","homepage":"https://github.com/slaviquee/monolith","requires":{"bins":["MonolithDaemon"]},"install":[{"kind":"download","label":"Install Monolith Daemon (macOS pkg)","url":"https://github.com/slaviquee/monolith/releases/download/v0.1.1/MonolithDaemon-v0.1.1.pkg","os":"darwin"},{"kind":"download","label":"Download Monolith Companion (macOS app zip)","url":"https://github.com/slaviquee/monolith/releases/download/v0.1.1/MonolithCompanion.app.zip","os":"darwin"}]}}
+description: Secure crypto wallet for AI agents. Hardware-isolated keys (Apple Secure Enclave), ERC-4337 smart wallet, on-chain spending caps, default-deny policy engine.
+homepage: https://github.com/slaviquee/monolith
+source: https://github.com/slaviquee/monolith/tree/main/skill
+metadata: {"openclaw":{"displayName":"Monolith","source":"https://github.com/slaviquee/monolith/tree/main/skill","homepage":"https://github.com/slaviquee/monolith","requires":{"bins":["MonolithDaemon"]},"install":[{"id":"daemon-pkg","kind":"download","label":"Install Monolith Daemon (macOS pkg)","url":"https://github.com/slaviquee/monolith/releases/download/v0.1.1/MonolithDaemon-v0.1.1.pkg","os":"darwin"},{"id":"companion-zip","kind":"download","label":"Download Monolith Companion (macOS app zip)","url":"https://github.com/slaviquee/monolith/releases/download/v0.1.1/MonolithCompanion.app.zip","os":"darwin"}]},"clawdbot":{"displayName":"Monolith","source":"https://github.com/slaviquee/monolith/tree/main/skill","homepage":"https://github.com/slaviquee/monolith","requires":{"bins":["MonolithDaemon"]},"install":[{"id":"daemon-pkg","kind":"download","label":"Install Monolith Daemon (macOS pkg)","url":"https://github.com/slaviquee/monolith/releases/download/v0.1.1/MonolithDaemon-v0.1.1.pkg","os":"darwin"},{"id":"companion-zip","kind":"download","label":"Download Monolith Companion (macOS app zip)","url":"https://github.com/slaviquee/monolith/releases/download/v0.1.1/MonolithCompanion.app.zip","os":"darwin"}]}}
 ---
 
 # Monolith — Crypto Wallet Skill
@@ -53,7 +55,7 @@ Secure crypto wallet for OpenClaw agents. Monolith combines hardware-isolated ke
 ## Setup
 
 1. Install Monolith from ClawHub (macOS install entries provide daemon + companion downloads)
-2. Run `monolith setup` to auto-start daemon/companion and verify wallet status
+2. Run `monolith setup` to verify wallet status and print manual startup commands if daemon/companion are not running
 3. If setup reports missing local components, install `MonolithDaemon.pkg` and `MonolithCompanion.app` from the release assets
 4. Fund the wallet address with ETH on your chosen chain
 5. Start transacting
