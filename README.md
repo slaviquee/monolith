@@ -151,7 +151,7 @@ Install signed and notarized artifacts from the latest release:
 
 Release page: <https://github.com/slaviquee/monolith/releases/latest>
 
-After installing both components, run `monolith setup`. The setup flow now attempts to auto-start the daemon and companion and prints actionable diagnostics if a local component is missing.
+After installing both components, run `monolith setup`. The setup flow prints actionable diagnostics and manual startup commands if a local component is missing or not running.
 
 ### Build From Source (Developer)
 
