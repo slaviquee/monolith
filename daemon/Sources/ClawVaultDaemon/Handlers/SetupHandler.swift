@@ -38,24 +38,36 @@ struct SetupHandler {
             }
         }
 
-        // Accept optional factoryAddress in the setup request
-        if let factory = json["factoryAddress"] as? String, !factory.isEmpty {
-            do {
-                try configStore.update { cfg in
+        // Resolve factory address:
+        // 1) explicit factoryAddress from request (highest priority),
+        // 2) existing persisted value,
+        // 3) chain default (Base shared factory).
+        let requestedFactory = (json["factoryAddress"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let chainDefaultFactory = DaemonConfig.defaultFactory(forChain: chainIdValue)
+
+        do {
+            try configStore.update { cfg in
+                if let factory = requestedFactory, !factory.isEmpty {
                     cfg.factoryAddress = factory
+                } else if cfg.factoryAddress.isEmpty || cfg.factoryAddress == DaemonConfig.unsetFactory {
+                    cfg.factoryAddress = chainDefaultFactory
                 }
-            } catch {
-                return .error(500, "Failed to persist factory address: \(error.localizedDescription)")
             }
+        } catch {
+            return .error(500, "Failed to persist factory address: \(error.localizedDescription)")
         }
 
         let config = configStore.read()
 
-        // Validate factory address is configured
+        // Validate factory address is configured for the requested chain.
         guard !config.factoryAddress.isEmpty,
-            config.factoryAddress != DaemonConfig.defaultFactory
+            config.factoryAddress != DaemonConfig.unsetFactory
         else {
-            return .error(503, "Factory address not configured. Deploy the ClawVaultFactory first.")
+            return .error(
+                503,
+                "Factory address not configured for chain \(chainIdValue). Pass factoryAddress in POST /setup."
+            )
         }
 
         // Get the signing public key for counterfactual address computation

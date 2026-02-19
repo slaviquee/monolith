@@ -30,8 +30,21 @@ struct DaemonConfig: Codable {
     static let socketPath = configDir.appendingPathComponent("daemon.sock").path
 
     static let defaultEntryPoint = "0x0000000071727De22E5E9d8BAf0edAc6f37da032"
-    // Factory address — set after deployment. This is a placeholder for the deployed ClawVaultFactory.
-    static let defaultFactory = "0x0000000000000000000000000000000000000000"
+    /// Placeholder for "factory not configured".
+    static let unsetFactory = "0x0000000000000000000000000000000000000000"
+    /// Shared production ClawVaultFactory on Base (chainId 8453).
+    static let baseFactory = "0x8a76e320146e7BDcbCe43D7A80D508683DC5Bf9a"
+    /// Backward-compatible default used by older call sites (Base-first default config).
+    static let defaultFactory = baseFactory
+
+    static func defaultFactory(forChain chainId: UInt64) -> String {
+        switch chainId {
+        case 8453:
+            return baseFactory
+        default:
+            return unsetFactory
+        }
+    }
 
     /// Load config without integrity verification (for first-run or legacy migration).
     static func load() throws -> DaemonConfig {
@@ -90,7 +103,7 @@ struct DaemonConfig: Codable {
         DaemonConfig(
             activeProfile: "balanced",
             homeChainId: 8453,
-            factoryAddress: defaultFactory,
+            factoryAddress: defaultFactory(forChain: 8453),
             entryPointAddress: defaultEntryPoint,
             frozen: false
         )
