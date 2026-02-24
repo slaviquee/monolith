@@ -4,7 +4,7 @@ import { mainnet } from 'viem/chains';
 // ENS resolution always goes to Ethereum mainnet (read-only, no daemon needed)
 const client = createPublicClient({
   chain: mainnet,
-  transport: http('https://cloudflare-eth.com'),
+  transport: http('https://ethereum-rpc.publicnode.com'),
 });
 
 /**
