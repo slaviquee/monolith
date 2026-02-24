@@ -32,15 +32,16 @@ struct DaemonConfig: Codable {
     static let defaultEntryPoint = "0x0000000071727De22E5E9d8BAf0edAc6f37da032"
     /// Placeholder for "factory not configured".
     static let unsetFactory = "0x0000000000000000000000000000000000000000"
-    /// Shared production MonolithFactory on Base (chainId 8453).
-    static let baseFactory = "0x8a76e320146e7BDcbCe43D7A80D508683DC5Bf9a"
-    /// Backward-compatible default used by older call sites (Base-first default config).
-    static let defaultFactory = baseFactory
+    /// Shared production MonolithFactory — same address on Ethereum L1 and Base
+    /// (deployed via CREATE2 through Nick's deterministic deployer).
+    static let sharedFactory = "0x4dA0408c8c655eC8576c33fB3a442412C82d8905"
+    /// Backward-compatible default used by older call sites.
+    static let defaultFactory = sharedFactory
 
     static func defaultFactory(forChain chainId: UInt64) -> String {
         switch chainId {
-        case 8453:
-            return baseFactory
+        case 1, 8453:
+            return sharedFactory
         default:
             return unsetFactory
         }
