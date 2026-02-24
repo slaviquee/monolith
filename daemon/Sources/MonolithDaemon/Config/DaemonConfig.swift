@@ -159,7 +159,7 @@ struct ChainConfig {
 
     static let ethereum = ChainConfig(
         chainId: 1,
-        rpcURL: "https://cloudflare-eth.com",
+        rpcURL: "https://ethereum-rpc.publicnode.com",
         bundlerURL: "https://public.pimlico.io/v2/1/rpc"
     )
 

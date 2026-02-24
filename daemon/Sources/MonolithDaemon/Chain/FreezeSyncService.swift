@@ -28,6 +28,14 @@ actor FreezeSyncService {
         }
 
         do {
+            // Counterfactual wallet address may be configured before deployment.
+            // Skip freeze sync until code exists at the address to avoid false "frozen" reads.
+            let deployed = try await isWalletDeployed(walletAddress: walletAddress)
+            guard deployed else {
+                print("[FreezeSync] Wallet not yet deployed — skipping sync")
+                return
+            }
+
             let frozenOnChain = try await queryOnChainFrozen(walletAddress: walletAddress)
 
             if frozenOnChain && !config.frozen {
@@ -65,6 +73,15 @@ actor FreezeSyncService {
     }
 
     // MARK: - Private
+
+    private func isWalletDeployed(walletAddress: String) async throws -> Bool {
+        let code = try await services.chainClient.getCode(address: walletAddress)
+        let cleaned = code
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "0x", with: "")
+        return !cleaned.isEmpty && cleaned.contains { $0 != "0" }
+    }
 
     /// Query the on-chain `frozen()` view function.
     private func queryOnChainFrozen(walletAddress: String) async throws -> Bool {

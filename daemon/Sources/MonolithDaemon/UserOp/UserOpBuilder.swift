@@ -29,11 +29,19 @@ actor UserOpBuilder {
         // 2. Encode the wallet's execute() call
         let walletCallData = encodeExecuteCall(target: target, value: value, data: calldata)
 
-        // 3. Fetch current gas prices from the chain
-        let gasPrice = try await chainClient.getGasPrice()
-        // Use 2x base fee as maxFeePerGas with a reasonable floor
-        let maxFeePerGas = max(gasPrice * 2, 100_000_000) // at least 0.1 gwei
-        let maxPriorityFeePerGas = max(gasPrice / 10, 10_000_000) // ~10% of base, floor 0.01 gwei
+        // 3. Fetch recommended ERC-4337 gas prices from Pimlico.
+        // Fallback to chain gas price if the bundler endpoint is unavailable.
+        let maxFeePerGas: UInt64
+        let maxPriorityFeePerGas: UInt64
+        do {
+            let gasTiers = try await bundlerClient.userOperationGasPrice()
+            maxFeePerGas = gasTiers.standard.maxFeePerGas
+            maxPriorityFeePerGas = gasTiers.standard.maxPriorityFeePerGas
+        } catch {
+            let gasPrice = try await chainClient.getGasPrice()
+            maxFeePerGas = max(gasPrice * 2, 100_000_000) // at least 0.1 gwei
+            maxPriorityFeePerGas = max(gasPrice / 10, 50_000_000) // at least 0.05 gwei
+        }
 
         // 4. Build preliminary UserOp for gas estimation
         var userOp = UserOperation(

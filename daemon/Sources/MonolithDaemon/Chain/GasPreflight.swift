@@ -21,7 +21,8 @@ enum GasPreflight {
         walletAddress: String,
         gasEstimate: BundlerClient.GasEstimate,
         maxFeePerGas: UInt64,
-        chainClient: ChainClient
+        chainClient: ChainClient,
+        bufferWei: UInt64 = minBufferWei
     ) async throws -> PreflightResult {
         let balance = try await chainClient.getBalance(address: walletAddress)
 
@@ -29,7 +30,7 @@ enum GasPreflight {
         let totalGas = gasEstimate.preVerificationGas + gasEstimate.verificationGasLimit
             + gasEstimate.callGasLimit
         let baseCost = totalGas * maxFeePerGas
-        let estimatedCost = baseCost + minBufferWei
+        let estimatedCost = baseCost + bufferWei
 
         if balance >= estimatedCost {
             return PreflightResult(

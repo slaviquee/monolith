@@ -158,21 +158,6 @@ struct SetupHandler {
             return .error(400, "recoveryAddress not configured. Pass it via POST /setup first.")
         }
 
-        // Check wallet is funded
-        let balance: UInt64
-        do {
-            balance = try await services.chainClient.getBalance(address: walletAddress)
-        } catch {
-            return .error(500, "Failed to check balance: \(error.localizedDescription)")
-        }
-
-        // Minimum balance: enough for deployment gas (~0.005 ETH)
-        let minBalance: UInt64 = 5_000_000_000_000_000 // 0.005 ETH
-        guard balance >= minBalance else {
-            let balanceEth = String(format: "%.6f", Double(balance) / 1e18)
-            return .error(402, "Insufficient balance for deployment. Current: \(balanceEth) ETH, need at least 0.005 ETH. Send ETH to \(walletAddress)")
-        }
-
         // Get signer public key for initCode
         let deployPubKey: (x: Data, y: Data)
         do {
@@ -205,6 +190,30 @@ struct SetupHandler {
                 calldata: Data(),
                 initCode: initCode
             )
+
+            // Gas preflight — compute required ETH from actual deployment UserOp estimate.
+            // Use a smaller additive buffer than normal txs to avoid an artificial high floor.
+            let actualGas = UserOperation.unpackGasLimits(userOp.accountGasLimits)
+            let actualFees = UserOperation.unpackGasFees(userOp.gasFees)
+            let actualPreVerGas = UserOperation.unpackUint256AsUInt64(userOp.preVerificationGas)
+            let gasEstimate = BundlerClient.GasEstimate(
+                preVerificationGas: actualPreVerGas,
+                verificationGasLimit: actualGas.verificationGasLimit,
+                callGasLimit: actualGas.callGasLimit
+            )
+            let deploymentBufferWei: UInt64 = 200_000_000_000_000 // 0.0002 ETH
+            let preflight = try await GasPreflight.check(
+                walletAddress: walletAddress,
+                gasEstimate: gasEstimate,
+                maxFeePerGas: actualFees.maxFeePerGas,
+                chainClient: services.chainClient,
+                bufferWei: deploymentBufferWei
+            )
+
+            if !preflight.sufficient {
+                let reason = preflight.message ?? "Insufficient gas for deployment"
+                return .error(402, "\(reason). Send ETH to \(walletAddress)")
+            }
 
             // Sign the UserOp
             let hash = await services.userOpBuilder.computeHash(userOp: userOp)

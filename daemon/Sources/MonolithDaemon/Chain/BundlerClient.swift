@@ -43,6 +43,25 @@ actor BundlerClient {
         )
     }
 
+    /// Fetch recommended ERC-4337 gas prices from Pimlico.
+    /// Returns slow/standard/fast tiers with maxFeePerGas and maxPriorityFeePerGas.
+    func userOperationGasPrice() async throws -> UserOperationGasPrice {
+        let result = try await rpcCallWithRetry(
+            method: "pimlico_getUserOperationGasPrice",
+            params: [Any]()
+        )
+        guard
+            let dict = result as? [String: Any],
+            let slow = parseGasPriceTier(dict["slow"]),
+            let standard = parseGasPriceTier(dict["standard"]),
+            let fast = parseGasPriceTier(dict["fast"])
+        else {
+            throw BundlerError.unexpectedResponse
+        }
+
+        return UserOperationGasPrice(slow: slow, standard: standard, fast: fast)
+    }
+
     /// Check supported entry points.
     func supportedEntryPoints() async throws -> [String] {
         let result = try await rpcCallWithRetry(
@@ -124,10 +143,32 @@ actor BundlerClient {
         return UInt64(cleaned, radix: 16) ?? 0
     }
 
+    private func parseGasPriceTier(_ value: Any?) -> UserOperationGasPrice.GasPrice? {
+        guard let dict = value as? [String: Any] else { return nil }
+        guard
+            let maxFeeHex = dict["maxFeePerGas"] as? String,
+            let maxPriorityHex = dict["maxPriorityFeePerGas"] as? String
+        else { return nil }
+        return UserOperationGasPrice.GasPrice(
+            maxFeePerGas: parseHex(maxFeeHex),
+            maxPriorityFeePerGas: parseHex(maxPriorityHex)
+        )
+    }
+
     struct GasEstimate {
         let preVerificationGas: UInt64
         let verificationGasLimit: UInt64
         let callGasLimit: UInt64
+    }
+
+    struct UserOperationGasPrice {
+        struct GasPrice {
+            let maxFeePerGas: UInt64
+            let maxPriorityFeePerGas: UInt64
+        }
+        let slow: GasPrice
+        let standard: GasPrice
+        let fast: GasPrice
     }
 
     enum BundlerError: Error {

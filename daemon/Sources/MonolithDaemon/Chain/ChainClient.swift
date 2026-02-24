@@ -35,6 +35,13 @@ actor ChainClient {
         return hexStr
     }
 
+    /// Get contract bytecode at an address.
+    func getCode(address: String) async throws -> String {
+        let result = try await rpcCall(method: "eth_getCode", params: [address, "latest"])
+        guard let hexStr = result as? String else { throw ChainError.unexpectedResponse }
+        return hexStr
+    }
+
     /// Get current gas price in wei.
     func getGasPrice() async throws -> UInt64 {
         let result = try await rpcCall(method: "eth_gasPrice", params: [Any]())
