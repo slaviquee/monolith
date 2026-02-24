@@ -142,55 +142,17 @@ function buildV3Path(tokenIn, fee, tokenOut) {
 }
 
 /**
- * Build a full Uniswap Universal Router swap intent (ETH → token).
- * Queries the QuoterV2 for a fresh price quote and applies slippage.
- *
- * @param {number} chainId - Chain ID (1 or 8453).
- * @param {bigint} amountInWei - ETH amount in wei.
- * @param {string} tokenOut - Output token symbol ('USDC') or address.
- * @param {number} [maxSlippageBps=50] - Max slippage in basis points (default 0.5%).
- * @returns {Promise<{target: string, calldata: string, value: string, chainHint: string}>}
+ * Encode Universal Router execute(commands, inputs[], deadline) calldata.
+ * Shared by both API and fallback paths.
  */
-export async function buildSwapIntent(chainId, amountInWei, tokenOut = 'USDC', maxSlippageBps = 50) {
-  const weth = UNISWAP.WETH[chainId];
-  if (!weth) throw new Error(`No WETH address for chain ${chainId}`);
-
-  // Resolve token out address
-  let tokenOutAddress;
-  if (tokenOut.startsWith('0x')) {
-    tokenOutAddress = tokenOut;
-  } else if (tokenOut.toUpperCase() === 'USDC') {
-    tokenOutAddress = getUSDCAddress(chainId);
-    if (!tokenOutAddress) throw new Error(`No USDC address for chain ${chainId}`);
-  } else {
-    throw new Error(`Unsupported output token: ${tokenOut}`);
-  }
-
-  // ETH→USDC typically uses the 500 (0.05%) fee tier on mainnet/Base
-  const fee = V3_FEES.LOW;
-
-  // 1. Get fresh quote from QuoterV2
-  const quotedAmountOut = await quoteExactInputSingle(
-    chainId, weth, tokenOutAddress, amountInWei, fee
-  );
-
-  // 2. Apply slippage to get amountOutMin
-  const amountOutMin = quotedAmountOut * BigInt(10000 - maxSlippageBps) / 10000n;
-
-  // 3. Build Universal Router calldata
-  // Commands: WRAP_ETH (0x0b) + V3_SWAP_EXACT_IN (0x00)
+function encodeUniversalRouterExecute(amountInWei, amountOutMin, weth, fee, tokenOutAddress) {
   const commands = '0x0b00';
 
-  // WRAP_ETH input: abi.encode(address recipient, uint256 amount)
-  // Recipient = ADDRESS_THIS (router holds WETH temporarily)
   const wrapInput = encodeAbiParameters(
     [{ type: 'address' }, { type: 'uint256' }],
     [UNISWAP.ADDRESS_THIS, amountInWei]
   );
 
-  // V3_SWAP_EXACT_IN input: abi.encode(address recipient, uint256 amountIn, uint256 amountOutMin, bytes path, bool payerIsUser)
-  // Recipient = MSG_SENDER (output tokens go to the wallet)
-  // payerIsUser = false (router already has WETH from WRAP_ETH step)
   const path = buildV3Path(weth, fee, tokenOutAddress);
   const swapInput = encodeAbiParameters(
     [
@@ -203,8 +165,7 @@ export async function buildSwapIntent(chainId, amountInWei, tokenOut = 'USDC', m
     [UNISWAP.MSG_SENDER, amountInWei, amountOutMin, path, false]
   );
 
-  // 4. Encode the full execute(bytes,bytes[],uint256) call
-  const deadline = BigInt(Math.floor(Date.now() / 1000) + 1800); // 30 minutes
+  const deadline = BigInt(Math.floor(Date.now() / 1000) + 1800);
   const calldata = encodeFunctionData({
     abi: [
       {
@@ -223,10 +184,183 @@ export async function buildSwapIntent(chainId, amountInWei, tokenOut = 'USDC', m
     args: [commands, [wrapInput, swapInput], deadline],
   });
 
+  return calldata;
+}
+
+// Fee tier iteration order for fallback (most common first)
+const FALLBACK_FEE_TIERS = [3000, 500, 10000];
+
+/**
+ * Resolve output token symbol to address.
+ * @param {string} tokenOut - Token symbol ('USDC') or hex address.
+ * @param {number} chainId
+ * @returns {string} Token address.
+ */
+export function resolveTokenOutAddress(tokenOut, chainId) {
+  if (tokenOut.startsWith('0x')) return tokenOut;
+  if (tokenOut.toUpperCase() === 'USDC') {
+    const addr = getUSDCAddress(chainId);
+    if (!addr) throw new Error(`No USDC address for chain ${chainId}`);
+    return addr;
+  }
+  throw new Error(`Unsupported output token: ${tokenOut}`);
+}
+
+/**
+ * Try the Uniswap Routing API for a swap quote.
+ * Returns { target, calldata, value, amountOut } on success, or null on failure.
+ *
+ * @param {number} chainId
+ * @param {string} tokenInAddress - WETH address
+ * @param {string} tokenOutAddress
+ * @param {bigint} amountInWei
+ * @param {number} maxSlippageBps
+ * @returns {Promise<{target: string, calldata: string, value: string, amountOut: bigint}|null>}
+ */
+export async function tryRoutingAPI(chainId, tokenInAddress, tokenOutAddress, amountInWei, maxSlippageBps) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+
+  try {
+    const body = {
+      tokenInChainId: chainId,
+      tokenOutChainId: chainId,
+      tokenIn: tokenInAddress,
+      tokenOut: tokenOutAddress,
+      amount: amountInWei.toString(),
+      type: 'EXACT_INPUT',
+      slippageTolerance: (maxSlippageBps / 100).toFixed(2),
+      configs: [{ routingType: 'CLASSIC', protocols: ['V3'] }],
+    };
+
+    const res = await fetch('https://api.uniswap.org/v2/quote', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+
+    if (!res.ok) return null;
+
+    const data = await res.json();
+
+    // Validate response shape
+    if (!data.quote || !data.methodParameters) return null;
+    const { methodParameters, quote } = data;
+    const target = methodParameters.to;
+    const calldata = methodParameters.calldata;
+    const value = methodParameters.value;
+
+    // Safety: target must be the expected Universal Router
+    if (target.toLowerCase() !== UNISWAP.UNIVERSAL_ROUTER.toLowerCase()) return null;
+
+    // Safety: chainId in response must match request
+    if (data.chainId !== undefined && data.chainId !== chainId) return null;
+
+    // Safety: calldata must be present and non-empty hex
+    if (!calldata || calldata === '0x' || calldata.length < 10) return null;
+
+    // Safety: value must be numeric string
+    if (value === undefined || value === null) return null;
+
+    // Safety: value must not exceed requested amountIn (prevents overspend)
+    if (BigInt(value) > amountInWei) return null;
+
+    const amountOut = BigInt(quote.amount ?? 0);
+    if (amountOut === 0n) return null;
+
+    return { target, calldata, value: String(value), amountOut };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * Fallback: probe on-chain QuoterV2 across fee tiers and pick the best quote.
+ * Tier iteration order: [3000, 500, 10000].
+ *
+ * @param {number} chainId
+ * @param {string} weth
+ * @param {string} tokenOutAddress
+ * @param {bigint} amountInWei
+ * @param {number} maxSlippageBps
+ * @returns {Promise<{fee: number, amountOut: bigint, amountOutMin: bigint}>}
+ */
+export async function fallbackQuote(chainId, weth, tokenOutAddress, amountInWei, maxSlippageBps, _quoter = quoteExactInputSingle) {
+  const results = [];
+  const errors = [];
+
+  for (const fee of FALLBACK_FEE_TIERS) {
+    try {
+      const amountOut = await _quoter(chainId, weth, tokenOutAddress, amountInWei, fee);
+      if (amountOut > 0n) {
+        results.push({ fee, amountOut });
+      }
+    } catch (err) {
+      errors.push({ fee, error: err.message });
+    }
+  }
+
+  if (results.length === 0) {
+    const tierSummary = FALLBACK_FEE_TIERS.map(f => {
+      const e = errors.find(x => x.fee === f);
+      return `${f}bps: ${e ? e.error : 'zero output'}`;
+    }).join('; ');
+    throw new Error(`All fee tier quotes failed. Tried [${FALLBACK_FEE_TIERS.join(', ')}]. Details: ${tierSummary}`);
+  }
+
+  // Pick best amountOut
+  results.sort((a, b) => (b.amountOut > a.amountOut ? 1 : b.amountOut < a.amountOut ? -1 : 0));
+  const best = results[0];
+  const amountOutMin = best.amountOut * BigInt(10000 - maxSlippageBps) / 10000n;
+
+  return { fee: best.fee, amountOut: best.amountOut, amountOutMin };
+}
+
+/**
+ * Build a full Uniswap swap intent (ETH -> token).
+ * Uses Uniswap Routing API when available; falls back to on-chain V3 fee-tier probing.
+ *
+ * @param {number} chainId - Chain ID (1 or 8453).
+ * @param {bigint} amountInWei - ETH amount in wei.
+ * @param {string} tokenOut - Output token symbol ('USDC') or address.
+ * @param {number} [maxSlippageBps=50] - Max slippage in basis points (default 0.5%).
+ * @returns {Promise<{target: string, calldata: string, value: string, chainHint: string, quotedAmountOut: bigint, source: string}>}
+ */
+export async function buildSwapIntent(chainId, amountInWei, tokenOut = 'USDC', maxSlippageBps = 50, _quoter = quoteExactInputSingle) {
+  const weth = UNISWAP.WETH[chainId];
+  if (!weth) throw new Error(`No WETH address for chain ${chainId}`);
+
+  const tokenOutAddress = resolveTokenOutAddress(tokenOut, chainId);
+
+  // Primary: try Routing API
+  const apiResult = await tryRoutingAPI(chainId, weth, tokenOutAddress, amountInWei, maxSlippageBps);
+  if (apiResult) {
+    return {
+      target: apiResult.target,
+      calldata: apiResult.calldata,
+      value: apiResult.value,
+      chainHint: chainId.toString(),
+      quotedAmountOut: apiResult.amountOut,
+      source: 'routing-api',
+    };
+  }
+
+  // Fallback: on-chain QuoterV2 with fee tier probing
+  const { fee, amountOut, amountOutMin } = await fallbackQuote(
+    chainId, weth, tokenOutAddress, amountInWei, maxSlippageBps, _quoter
+  );
+
+  const calldata = encodeUniversalRouterExecute(amountInWei, amountOutMin, weth, fee, tokenOutAddress);
+
   return {
     target: UNISWAP.UNIVERSAL_ROUTER,
     calldata,
     value: amountInWei.toString(),
     chainHint: chainId.toString(),
+    quotedAmountOut: amountOut,
+    source: 'on-chain-quoter',
   };
 }

@@ -15,7 +15,7 @@ Secure crypto wallet for OpenClaw agents. Monolith combines hardware-isolated ke
 | Command | What it does | Requires daemon? |
 |---------|-------------|------------------|
 | `send <to> <amount> [token] [chainId]` | Send ETH or USDC | Yes |
-| `swap <amountETH> [tokenOut] [chainId]` | Swap ETH for tokens via Uniswap | Yes |
+| `swap <amountETH> [tokenOut] [chainId]` | Swap ETH for tokens via Uniswap (Routing API with on-chain fallback) | Yes |
 | `balance <address> [chainId]` | Check ETH and stablecoin balances | No (read-only) |
 | `capabilities` | Show current limits, budgets, gas status | Yes |
 | `decode <target> <calldata> <value>` | Decode a tx intent into human-readable summary | Yes |
@@ -88,6 +88,12 @@ returns HTTP 202 with a reason, summary, and expiration. The agent should:
 
 No separate approval script is needed -- the same `send` or `swap` command is
 re-invoked with the approval code passed through the daemon.
+
+## Swap Routing
+
+Uses Uniswap Routing API when available; falls back to on-chain V3 fee-tier probing
+(tries 3000, 500, 10000 bps tiers, picks best quote). The fallback ensures swap
+intents can still be built when the API is down or returns unexpected results.
 
 ## Chains
 

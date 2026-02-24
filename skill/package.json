@@ -15,7 +15,8 @@
     "setup": "node scripts/setup.js",
     "audit-log": "node scripts/audit-log.js",
     "policy": "node scripts/policy.js",
-    "allowlist": "node scripts/allowlist.js"
+    "allowlist": "node scripts/allowlist.js",
+    "test": "node --test 'tests/**/*.test.js'"
   },
   "dependencies": {
     "viem": "^2.21.0"

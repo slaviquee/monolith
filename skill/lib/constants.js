@@ -2,7 +2,7 @@
 export const CHAINS = {
   1: {
     name: 'Ethereum Mainnet',
-    rpcUrl: 'https://cloudflare-eth.com',
+    rpcUrl: 'https://ethereum-rpc.publicnode.com',
     bundlerUrl: 'https://public.pimlico.io/v2/1/rpc',
     explorer: 'https://etherscan.io',
   },
