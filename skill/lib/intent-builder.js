@@ -263,7 +263,10 @@ export async function tryRoutingAPI(chainId, tokenInAddress, tokenOutAddress, am
     // Safety: value must be numeric string
     if (value === undefined || value === null) return null;
 
-    const amountOut = BigInt(quote.amount || quote.amountDecimals ? quote.amount : 0);
+    // Safety: value must not exceed requested amountIn (prevents overspend)
+    if (BigInt(value) > amountInWei) return null;
+
+    const amountOut = BigInt(quote.amount ?? 0);
     if (amountOut === 0n) return null;
 
     return { target, calldata, value: String(value), amountOut };

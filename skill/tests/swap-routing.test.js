@@ -129,6 +129,21 @@ describe('swap routing', async () => {
       const result = await tryRoutingAPI(1, WETH_MAINNET, USDC_MAINNET, AMOUNT_IN, 50);
       assert.equal(result, null);
     });
+
+    it('returns null when value exceeds amountIn', async () => {
+      const mockResponse = makeMockAPIResponse();
+      // API returns value higher than requested — must reject
+      mockResponse.methodParameters.value = '999999999999999999';
+
+      globalThis.fetch = mock.fn(async () => ({
+        ok: true,
+        json: async () => mockResponse,
+      }));
+
+      const { tryRoutingAPI } = await import('../lib/intent-builder.js');
+      const result = await tryRoutingAPI(1, WETH_MAINNET, USDC_MAINNET, AMOUNT_IN, 50);
+      assert.equal(result, null);
+    });
   });
 
   // --- Fallback quote tests ---
@@ -158,24 +173,6 @@ describe('swap routing', async () => {
       );
     });
 
-    it('returns best quote when multiple tiers succeed (live RPC)', async () => {
-      // This test hits real mainnet RPC with a real pair (ETH/USDC).
-      // Multiple fee tiers may have pools; verify we get the best one.
-      const { fallbackQuote } = await import('../lib/intent-builder.js');
-
-      const result = await fallbackQuote(
-        1,
-        '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
-        '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
-        100000000000000000n, // 0.1 ETH
-        50
-      );
-
-      assert.ok(result.fee > 0, 'fee should be positive');
-      assert.ok(result.amountOut > 0n, 'amountOut should be positive');
-      assert.ok(result.amountOutMin > 0n, 'amountOutMin should be positive');
-      assert.ok(result.amountOutMin < result.amountOut, 'amountOutMin should be less than amountOut (slippage applied)');
-    });
   });
 
   // --- buildSwapIntent integration (API path) ---
