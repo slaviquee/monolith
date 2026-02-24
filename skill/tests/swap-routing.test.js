@@ -22,6 +22,11 @@ describe('swap routing', async () => {
 
   // --- Routing API tests ---
 
+  const WETH_MAINNET = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2';
+  const USDC_MAINNET = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
+  const UNIVERSAL_ROUTER = '0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD';
+  const AMOUNT_IN = 100000000000000000n; // 0.1 ETH
+
   describe('tryRoutingAPI', () => {
     let originalFetch;
 
@@ -32,11 +37,6 @@ describe('swap routing', async () => {
     afterEach(() => {
       globalThis.fetch = originalFetch;
     });
-
-    const WETH_MAINNET = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2';
-    const USDC_MAINNET = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
-    const UNIVERSAL_ROUTER = '0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD';
-    const AMOUNT_IN = 100000000000000000n; // 0.1 ETH
 
     function makeMockAPIResponse(overrides = {}) {
       return {
@@ -149,20 +149,12 @@ describe('swap routing', async () => {
   // --- Fallback quote tests ---
 
   describe('fallbackQuote', () => {
-    it('throws with tier details when all tiers fail (bogus token)', async () => {
+    it('throws with tier details when all tiers fail', async () => {
       const { fallbackQuote } = await import('../lib/intent-builder.js');
-
-      // Use a bogus token address with no Uniswap pools to force all tiers to fail
-      const BOGUS_TOKEN = '0x0000000000000000000000000000000000000001';
+      const mockQuoter = mock.fn(async () => { throw new Error('execution reverted'); });
 
       await assert.rejects(
-        () => fallbackQuote(
-          1,
-          '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
-          BOGUS_TOKEN,
-          100000000000000000n,
-          50
-        ),
+        () => fallbackQuote(1, WETH_MAINNET, USDC_MAINNET, AMOUNT_IN, 50, mockQuoter),
         (err) => {
           assert.match(err.message, /All fee tier quotes failed/);
           assert.match(err.message, /3000/);
@@ -171,8 +163,23 @@ describe('swap routing', async () => {
           return true;
         }
       );
+      assert.equal(mockQuoter.mock.calls.length, 3); // one per tier
     });
 
+    it('selects best quote across fee tiers', async () => {
+      const { fallbackQuote } = await import('../lib/intent-builder.js');
+      // Return different amounts per fee tier: 3000→200, 500→300 (best), 10000→throw
+      const mockQuoter = mock.fn(async (chainId, tokenIn, tokenOut, amountIn, fee) => {
+        if (fee === 3000) return 200000000n;
+        if (fee === 500) return 300000000n;
+        throw new Error('no pool');
+      });
+
+      const result = await fallbackQuote(1, WETH_MAINNET, USDC_MAINNET, AMOUNT_IN, 50, mockQuoter);
+      assert.equal(result.fee, 500);                   // picked the 500 tier (best output)
+      assert.equal(result.amountOut, 300000000n);
+      assert.ok(result.amountOutMin < result.amountOut); // slippage applied
+    });
   });
 
   // --- buildSwapIntent integration (API path) ---
@@ -221,17 +228,14 @@ describe('swap routing', async () => {
         ok: false,
         status: 503,
       }));
+      const mockQuoter = mock.fn(async () => { throw new Error('execution reverted'); });
 
       const { buildSwapIntent } = await import('../lib/intent-builder.js');
-
-      // Use a bogus token address so the fallback fails fast (no real pools)
-      // This verifies the fallback path is reached (error comes from tier probing, not API)
-      try {
-        await buildSwapIntent(1, 100000000000000000n, '0x0000000000000000000000000000000000000001', 50);
-        assert.fail('Should have thrown');
-      } catch (err) {
-        assert.match(err.message, /All fee tier quotes failed/);
-      }
+      await assert.rejects(
+        () => buildSwapIntent(1, AMOUNT_IN, '0x0000000000000000000000000000000000000001', 50, mockQuoter),
+        /All fee tier quotes failed/
+      );
+      assert.ok(mockQuoter.mock.calls.length > 0); // confirms fallback path was reached
     });
 
     it('returns correct intent shape with chainHint', async () => {

@@ -288,13 +288,13 @@ export async function tryRoutingAPI(chainId, tokenInAddress, tokenOutAddress, am
  * @param {number} maxSlippageBps
  * @returns {Promise<{fee: number, amountOut: bigint, amountOutMin: bigint}>}
  */
-export async function fallbackQuote(chainId, weth, tokenOutAddress, amountInWei, maxSlippageBps) {
+export async function fallbackQuote(chainId, weth, tokenOutAddress, amountInWei, maxSlippageBps, _quoter = quoteExactInputSingle) {
   const results = [];
   const errors = [];
 
   for (const fee of FALLBACK_FEE_TIERS) {
     try {
-      const amountOut = await quoteExactInputSingle(chainId, weth, tokenOutAddress, amountInWei, fee);
+      const amountOut = await _quoter(chainId, weth, tokenOutAddress, amountInWei, fee);
       if (amountOut > 0n) {
         results.push({ fee, amountOut });
       }
@@ -329,7 +329,7 @@ export async function fallbackQuote(chainId, weth, tokenOutAddress, amountInWei,
  * @param {number} [maxSlippageBps=50] - Max slippage in basis points (default 0.5%).
  * @returns {Promise<{target: string, calldata: string, value: string, chainHint: string, quotedAmountOut: bigint, source: string}>}
  */
-export async function buildSwapIntent(chainId, amountInWei, tokenOut = 'USDC', maxSlippageBps = 50) {
+export async function buildSwapIntent(chainId, amountInWei, tokenOut = 'USDC', maxSlippageBps = 50, _quoter = quoteExactInputSingle) {
   const weth = UNISWAP.WETH[chainId];
   if (!weth) throw new Error(`No WETH address for chain ${chainId}`);
 
@@ -350,7 +350,7 @@ export async function buildSwapIntent(chainId, amountInWei, tokenOut = 'USDC', m
 
   // Fallback: on-chain QuoterV2 with fee tier probing
   const { fee, amountOut, amountOutMin } = await fallbackQuote(
-    chainId, weth, tokenOutAddress, amountInWei, maxSlippageBps
+    chainId, weth, tokenOutAddress, amountInWei, maxSlippageBps, _quoter
   );
 
   const calldata = encodeUniversalRouterExecute(amountInWei, amountOutMin, weth, fee, tokenOutAddress);
