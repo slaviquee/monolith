@@ -44,15 +44,18 @@ async function main() {
     console.log(`Quote: ~${humanAmount.toFixed(decimals === 6 ? 2 : 6)} ${tokenOut} (via ${intent.source})`);
   }
 
+  // Strip non-intent fields before sending to daemon (BigInt can't be serialized)
+  const { quotedAmountOut, source, ...daemonIntent } = intent;
+
   // Attach approval code if re-submitting after a 202
   if (approvalCode) {
-    intent.approvalCode = approvalCode;
+    daemonIntent.approvalCode = approvalCode;
   }
 
   console.log(`Swap intent: ${amountETH} ETH -> ${tokenOut} (max slippage: ${maxSlippageBps / 100}%)`);
 
   try {
-    const response = await daemon.sign(intent);
+    const response = await daemon.sign(daemonIntent);
 
     if (response.status === 200) {
       console.log(`Transaction submitted: ${response.data.userOpHash}`);
